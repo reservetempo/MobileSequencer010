@@ -8,7 +8,7 @@ import { noteNameForRow } from "../model/melodyScale";
 import { drumColour } from "../model/drums";
 
 const LABEL_W = 28; // px, row note labels
-const ROW_H = 34; // px per row
+const ROW_H = 40; // px per row (8-wide grid -> roughly square cells)
 
 export class GridView {
   readonly canvas: HTMLCanvasElement;
@@ -151,12 +151,6 @@ export class GridView {
       ctx.strokeStyle = "#ffd60a";
       ctx.lineWidth = 3;
       ctx.strokeRect(x + 1.5, 1.5, this.cellW - 3, totalH - 3);
-    }
-
-    // Muted block: dim the cells.
-    if (!g.active) {
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
-      ctx.fillRect(LABEL_W, 0, cssW - LABEL_W, totalH);
     }
   }
 }

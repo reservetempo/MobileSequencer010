@@ -28,7 +28,7 @@ const VOICE_GAIN = 0.9;
 const TWO_PI = Math.PI * 2;
 
 const NUM_ROWS = 7;
-const NUM_STEPS = 16;
+const NUM_STEPS = 8;
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
@@ -351,13 +351,22 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.pitchRanges = new Array(NUM_DRUMS).fill(null);
 
     // --- pattern + transport state ---
-    this.grid = null;        // [{cells:Int, root, scale, active} x NUM_BLOCKS]
+    // Active pattern the loop is currently playing.
+    this.blocks = null;      // [{cells:Int, root, scale} x NUM_BLOCKS]
+    this.order = null;       // [grid index | -1] x ORDER_SLOTS
+    // Staged pattern: edits while playing land here and are promoted to active
+    // only when the loop restarts, so the current pass plays unchanged.
+    this.pendingBlocks = null;
+    this.pendingOrder = null;
+    this.hasPending = false;
+
     this.tempo = 120;
     this.playing = false;
-    this.seqPos = 0;         // position within the chained active blocks
+    this.seqPos = 0;         // position within the ordered sequence
     this.samplesToNextStep = 0;
-    this.lastBlock = -2;     // for change-only playhead reporting
+    this.lastGrid = -2;      // for change-only playhead reporting
     this.lastCol = -2;
+    this.lastSlot = -2;
 
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
@@ -367,17 +376,37 @@ class EngineProcessor extends AudioWorkletProcessor {
       case "trigger": { const ch = this.channels[m.drum]; if (ch) ch.trigger(m.snapshot, m.gate | 0); break; }
       case "params": { const ch = this.channels[m.drum]; if (ch) ch.setParams(m.snapshot); break; }
       case "pitchRanges": this.pitchRanges = m.ranges; break;
-      case "grid": this.grid = m.blocks; break;
+      case "pattern":
+        if (this.playing) {
+          // Stage; applied at the next loop restart.
+          this.pendingBlocks = m.blocks;
+          this.pendingOrder = m.order;
+          this.hasPending = true;
+        } else {
+          this.blocks = m.blocks;
+          this.order = m.order;
+        }
+        break;
       case "tempo": this.tempo = m.bpm; break;
       case "play":
+        this.promotePending();
         this.playing = true;
         this.seqPos = 0;
         this.samplesToNextStep = 0;
         break;
       case "stop":
         this.playing = false;
-        this.reportPlayhead(-1, 0);
+        this.promotePending(); // settle staged edits once stopped
+        this.reportPlayhead(-1, -1, -1);
         break;
+    }
+  }
+
+  promotePending() {
+    if (this.hasPending) {
+      this.blocks = this.pendingBlocks;
+      this.order = this.pendingOrder;
+      this.hasPending = false;
     }
   }
 
@@ -386,31 +415,37 @@ class EngineProcessor extends AudioWorkletProcessor {
     return (this.sr * 60) / Math.max(1, this.tempo) / 4;
   }
 
-  reportPlayhead(block, col) {
-    if (block !== this.lastBlock || col !== this.lastCol) {
-      this.lastBlock = block;
+  reportPlayhead(grid, col, slot) {
+    if (grid !== this.lastGrid || col !== this.lastCol || slot !== this.lastSlot) {
+      this.lastGrid = grid;
       this.lastCol = col;
-      this.port.postMessage({ type: "playhead", block, col });
+      this.lastSlot = slot;
+      this.port.postMessage({ type: "playhead", grid, col, slot });
     }
   }
 
-  // Fire one step of the chained active blocks (port of fireWipBlock + the WIP
-  // branch of the audio callback). Triggers each painted row pitched to its key.
+  // Fire one step of the ordered sequence: walk the 20-slot order list, play each
+  // referenced grid's 8 columns, looping. Each painted row triggers pitched to
+  // its grid's key. Staged edits are promoted only at the loop boundary.
   fireStep(gate) {
-    const blocks = this.grid;
-    if (!blocks) { this.reportPlayhead(-1, 0); return; }
+    const blocks = this.blocks;
+    const order = this.order;
+    if (!blocks || !order) { this.reportPlayhead(-1, -1, -1); return; }
 
-    // Collect active blocks.
-    const active = [];
-    for (let b = 0; b < blocks.length; b++) if (blocks[b].active) active.push(b);
-    if (active.length === 0) { this.reportPlayhead(-1, 0); return; }
+    // Build the play sequence from filled order slots.
+    const seq = [];
+    for (let i = 0; i < order.length; i++) {
+      const g = order[i];
+      if (g >= 0 && g < blocks.length) seq.push({ grid: g, slot: i });
+    }
+    if (seq.length === 0) { this.reportPlayhead(-1, -1, -1); return; }
 
-    const total = active.length * NUM_STEPS;
+    const total = seq.length * NUM_STEPS;
     if (this.seqPos >= total) this.seqPos %= total;
 
-    const block = active[(this.seqPos / NUM_STEPS) | 0];
+    const entry = seq[(this.seqPos / NUM_STEPS) | 0];
     const col = this.seqPos % NUM_STEPS;
-    const g = blocks[block];
+    const g = blocks[entry.grid];
 
     for (let row = 0; row < NUM_ROWS; row++) {
       const drum = g.cells[row * NUM_STEPS + col];
@@ -424,8 +459,10 @@ class EngineProcessor extends AudioWorkletProcessor {
       ch.trigger(snap, gate);
     }
 
-    this.reportPlayhead(block, col);
+    this.reportPlayhead(entry.grid, col, entry.slot);
+
     this.seqPos = (this.seqPos + 1) % total;
+    if (this.seqPos === 0) this.promotePending(); // loop completed -> apply staged edits
   }
 
   renderChannels(master, offset, n) {

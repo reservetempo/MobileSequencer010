@@ -3,8 +3,9 @@
 // public/worklet/engine.js (served verbatim — see that file's header).
 
 export interface Playhead {
-  block: number; // -1 when stopped / no active block
+  grid: number; // -1 when stopped / nothing playing
   col: number;
+  slot: number; // index in the order list (-1 when stopped)
 }
 
 export class EngineHost {
@@ -37,7 +38,7 @@ export class EngineHost {
     });
     this.node.port.onmessage = (e) => {
       const m = e.data;
-      if (m.type === "playhead") this.onPlayhead?.({ block: m.block, col: m.col });
+      if (m.type === "playhead") this.onPlayhead?.({ grid: m.grid, col: m.col, slot: m.slot });
     };
     this.node.connect(this.ctx.destination);
     await this.ctx.resume();
@@ -63,9 +64,13 @@ export class EngineHost {
     this.node?.port.postMessage({ type: "pitchRanges", ranges });
   }
 
-  /** Replace the pattern (4 blocks). Resend whenever cells/key/active change. */
-  setGrid(blocks: { cells: number[]; root: number; scale: number; active: boolean }[]): void {
-    this.node?.port.postMessage({ type: "grid", blocks });
+  /** Replace the pattern (6 grids + 20-slot order). Resend on any edit; while
+      playing the engine stages it and applies at the next loop restart. */
+  setPattern(
+    blocks: { cells: number[]; root: number; scale: number }[],
+    order: number[]
+  ): void {
+    this.node?.port.postMessage({ type: "pattern", blocks, order });
   }
 
   setTempo(bpm: number): void {

@@ -1,17 +1,24 @@
-// The pattern data: four 16x7 melody grids ("blocks") chained over their active
-// members into one loop. Port of MelodyGrid.h + the WIP parts of Arrangement.h.
+// The pattern data: six 8x7 melody grids plus a 20-slot "order" list that
+// determines the playback sequence. Each grid has an identity colour used in the
+// order view and the workspace picker. The loop plays the order list top to
+// bottom, playing each referenced grid's 8 steps, then repeats.
 
 export const NUM_ROWS = 7;
-export const NUM_STEPS = 16;
-export const NUM_BLOCKS = 4;
+export const NUM_STEPS = 8;
+export const NUM_BLOCKS = 6;
+export const ORDER_SLOTS = 20;
 export const EMPTY = -1;
+
+// Identity colour per grid (distinct from the per-cell drum colours).
+export const GRID_COLORS = [
+  "#ff6b6b", "#ffa94d", "#ffd43b", "#69db7c", "#4dabf7", "#b197fc",
+];
 
 export class MelodyGrid {
   // cells[row * NUM_STEPS + step] = drum index, or EMPTY.
   readonly cells: Int16Array = new Int16Array(NUM_ROWS * NUM_STEPS).fill(EMPTY);
   root = 0; // 0 = C
   scale = 0; // 0 = Major
-  active = true; // when false, muted / excluded from the loop
 
   private idx(row: number, step: number): number {
     return row * NUM_STEPS + step;
@@ -39,24 +46,55 @@ export class MelodyGrid {
   }
 }
 
+export interface BlockMessage {
+  cells: number[];
+  root: number;
+  scale: number;
+}
+
 export class WipArrangement {
   readonly blocks: MelodyGrid[] = [];
+  // order[slot] = grid index (0..NUM_BLOCKS-1) or EMPTY.
+  readonly order: Int8Array = new Int8Array(ORDER_SLOTS).fill(EMPTY);
 
   constructor() {
-    for (let b = 0; b < NUM_BLOCKS; b++) {
-      const g = new MelodyGrid();
-      g.active = b === 0; // start as a single 16-step loop; enable more to extend
-      this.blocks.push(g);
-    }
+    for (let b = 0; b < NUM_BLOCKS; b++) this.blocks.push(new MelodyGrid());
+    this.order[0] = 0; // start with grid 1 in the loop
   }
 
-  /** Serialise to the plain shape the worklet scheduler consumes. */
-  toMessage(): { cells: number[]; root: number; scale: number; active: boolean }[] {
+  /** Grids serialised for the worklet scheduler. */
+  blocksMessage(): BlockMessage[] {
     return this.blocks.map((g) => ({
       cells: Array.from(g.cells),
       root: g.root,
       scale: g.scale,
-      active: g.active,
     }));
+  }
+
+  orderArray(): number[] {
+    return Array.from(this.order);
+  }
+
+  /** Drop a grid into the first empty order slot. Returns the slot, or -1 if full. */
+  addToLoop(gridIndex: number): number {
+    for (let i = 0; i < ORDER_SLOTS; i++) {
+      if (this.order[i] === EMPTY) {
+        this.order[i] = gridIndex;
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** Number of filled slots (sections that will play). */
+  filledSlots(): number {
+    let n = 0;
+    for (let i = 0; i < ORDER_SLOTS; i++) if (this.order[i] !== EMPTY) n++;
+    return n;
+  }
+
+  /** Total 16th-note steps in one loop pass. */
+  loopSteps(): number {
+    return this.filledSlots() * NUM_STEPS;
   }
 }

@@ -1,20 +1,24 @@
 // App shell: owns the engine + pattern + UI state, and switches between the two
-// full-screen views (Grid / Sound). Phase 3 builds out the Grid view; the Sound
-// view is a stub until Phase 4.
+// full-screen views (Grid / Sound). Within Grid you pick a workspace from a
+// dropdown: one of the six 8x7 note grids, or the "Order" list (20 slots) that
+// sequences which grids play and in what order.
 
-import { EngineHost } from "../audio/engineHost";
+import { EngineHost, Playhead } from "../audio/engineHost";
 import { DRUMS, DrumType } from "../model/drums";
 import { getParamSpec } from "../model/paramSpec";
 import { ParamId } from "../model/params";
 import { DrumKit } from "../model/drumKit";
 import { SoundLibrary } from "../model/soundLibrary";
 import { serialize, deserialize, ProjectJSON } from "../model/project";
-import { WipArrangement, NUM_BLOCKS } from "../model/melodyGrid";
+import {
+  WipArrangement, NUM_BLOCKS, ORDER_SLOTS, EMPTY, GRID_COLORS,
+} from "../model/melodyGrid";
 import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
 import { GridView } from "./gridView";
 import { SoundView } from "./soundView";
 
 const PROJECT_KEY = "msq010.project";
+const ORDER_VIEW = NUM_BLOCKS; // workspace value for the order list
 
 type View = "grid" | "sound";
 
@@ -28,25 +32,33 @@ export class App {
 
   private view: View = "grid";
   private selectedDrum: DrumType = DrumType.Kick;
-  private selectedBlock = 0;
+  private workspace = 0; // 0..5 = grid index, ORDER_VIEW = order list
   private playing = false;
   private tempo = 120;
 
   private root: HTMLElement;
   private viewRoot!: HTMLElement;
   private gridView = new GridView(this.arr.blocks[0]);
+  private loopTimeEl: HTMLElement | null = null;
+  private orderSlotEls: HTMLElement[] | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
-
-    this.engine.onPlayhead = (p) => {
-      this.gridView.setPlayhead(p.block === this.selectedBlock ? p.col : -1);
-    };
+    this.gridView.onEdit = () => this.syncPattern();
+    this.engine.onPlayhead = (p) => this.handlePlayhead(p);
     // Resume audio after iOS/tab interruptions.
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") this.engine.resume();
     });
     this.renderStart();
+  }
+
+  private handlePlayhead(p: Playhead): void {
+    const col = this.workspace < NUM_BLOCKS && p.grid === this.workspace ? p.col : -1;
+    this.gridView.setPlayhead(col);
+    if (this.orderSlotEls) {
+      this.orderSlotEls.forEach((el, i) => el.classList.toggle("playing", i === p.slot));
+    }
   }
 
   // --- engine sync ------------------------------------------------------
@@ -58,17 +70,26 @@ export class App {
       ranges[i] = [sp.min, sp.max];
     }
     this.engine.setPitchRanges(ranges);
-    this.syncGrid();
+    this.syncPattern();
     this.engine.setTempo(this.tempo);
   }
 
-  private syncGrid(): void {
-    this.engine.setGrid(this.arr.toMessage());
+  /** Resend grids + order. While playing the engine stages this and applies it
+      at the next loop restart, so the current pass plays unchanged. */
+  private syncPattern(): void {
+    this.engine.setPattern(this.arr.blocksMessage(), this.arr.orderArray());
+    this.updateLoopTime();
     this.persist();
   }
 
+  private updateLoopTime(): void {
+    if (!this.loopTimeEl) return;
+    const steps = this.arr.loopSteps();
+    const sec = (steps * 60) / Math.max(1, this.tempo) / 4; // 16th notes
+    this.loopTimeEl.textContent = steps > 0 ? `${sec.toFixed(2)}s · ${steps} steps` : "empty";
+  }
+
   // --- persistence ------------------------------------------------------
-  /** Debounced autosave of the whole project to localStorage. */
   private persist(): void {
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
@@ -123,13 +144,11 @@ export class App {
     this.afterProjectChange();
   }
 
-  /** Re-push everything to the engine and fully re-render after a load/new. */
   private afterProjectChange(): void {
     if (this.playing) { this.playing = false; this.engine.stop(); }
-    this.gridView = new GridView(this.arr.blocks[this.selectedBlock]);
-    this.engine.onPlayhead = (p) => {
-      this.gridView.setPlayhead(p.block === this.selectedBlock ? p.col : -1);
-    };
+    const gi = this.workspace < NUM_BLOCKS ? this.workspace : 0;
+    this.gridView = new GridView(this.arr.blocks[gi]);
+    this.gridView.onEdit = () => this.syncPattern();
     this.pushAll();
     this.render();
   }
@@ -162,6 +181,8 @@ export class App {
   // --- main render ------------------------------------------------------
   private render(): void {
     this.root.innerHTML = "";
+    this.loopTimeEl = null;
+    this.orderSlotEls = null;
 
     const bar = document.createElement("header");
     bar.className = "topbar";
@@ -261,6 +282,7 @@ export class App {
       this.tempo = Number(tempo.value);
       this.engine.setTempo(this.tempo);
       label.textContent = `${this.tempo}`;
+      this.updateLoopTime();
       this.persist();
     };
 
@@ -271,49 +293,74 @@ export class App {
   // --- grid view --------------------------------------------------------
   private renderGrid(): void {
     const v = this.viewRoot;
+    v.append(this.workspaceBar());
 
-    v.append(this.blockTabs());
-    v.append(this.blockControls());
+    if (this.workspace === ORDER_VIEW) {
+      v.append(this.renderOrderEditor());
+    } else {
+      v.append(this.gridControls());
 
-    const gridWrap = document.createElement("div");
-    gridWrap.className = "grid-wrap";
-    this.gridView.setBlock(this.arr.blocks[this.selectedBlock]);
-    this.gridView.setActiveDrum(this.selectedDrum);
-    gridWrap.append(this.gridView.canvas);
-    v.append(gridWrap);
+      const gridWrap = document.createElement("div");
+      gridWrap.className = "grid-wrap";
+      this.gridView.setBlock(this.arr.blocks[this.workspace]);
+      this.gridView.setActiveDrum(this.selectedDrum);
+      gridWrap.append(this.gridView.canvas);
+      v.append(gridWrap);
 
-    v.append(this.drumSelector((d) => {
-      this.selectedDrum = d;
-      this.gridView.setActiveDrum(d);
-      this.audition(d);
-    }));
+      v.append(this.drumSelector((d) => {
+        this.selectedDrum = d;
+        this.gridView.setActiveDrum(d);
+        this.audition(d);
+      }));
 
-    // Size the canvas after it is in the DOM.
-    requestAnimationFrame(() => this.gridView.layout());
-  }
-
-  private blockTabs(): HTMLElement {
-    const row = document.createElement("div");
-    row.className = "block-tabs";
-    for (let b = 0; b < NUM_BLOCKS; b++) {
-      const tab = document.createElement("button");
-      const blk = this.arr.blocks[b];
-      tab.textContent = String(b + 1);
-      tab.className =
-        "block-tab" +
-        (b === this.selectedBlock ? " on" : "") +
-        (blk.active ? "" : " muted");
-      tab.onclick = () => {
-        this.selectedBlock = b;
-        this.render();
-      };
-      row.append(tab);
+      requestAnimationFrame(() => this.gridView.layout());
     }
-    return row;
+
+    this.updateLoopTime();
   }
 
-  private blockControls(): HTMLElement {
-    const blk = this.arr.blocks[this.selectedBlock];
+  private workspaceBar(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "workspace-bar";
+
+    const chip = document.createElement("span");
+    chip.className = "ws-chip";
+    if (this.workspace < NUM_BLOCKS) chip.style.background = GRID_COLORS[this.workspace];
+    else chip.style.visibility = "hidden";
+
+    const sel = document.createElement("select");
+    sel.className = "workspace-select";
+    for (let i = 0; i < NUM_BLOCKS; i++) {
+      const o = document.createElement("option");
+      o.value = String(i);
+      o.textContent = `Grid ${i + 1}`;
+      sel.append(o);
+    }
+    const orderOpt = document.createElement("option");
+    orderOpt.value = String(ORDER_VIEW);
+    orderOpt.textContent = "Order";
+    sel.append(orderOpt);
+    sel.value = String(this.workspace);
+    sel.onchange = () => {
+      this.workspace = Number(sel.value);
+      this.render();
+    };
+
+    const loop = document.createElement("div");
+    loop.className = "loop-time";
+    const loopLabel = document.createElement("span");
+    loopLabel.className = "loop-time-label";
+    loopLabel.textContent = "Loop";
+    this.loopTimeEl = document.createElement("span");
+    this.loopTimeEl.className = "loop-time-val";
+    loop.append(loopLabel, this.loopTimeEl);
+
+    bar.append(chip, sel, loop);
+    return bar;
+  }
+
+  private gridControls(): HTMLElement {
+    const blk = this.arr.blocks[this.workspace];
     const row = document.createElement("div");
     row.className = "block-ctl";
 
@@ -328,7 +375,7 @@ export class App {
     rootSel.onchange = () => {
       blk.setRoot(Number(rootSel.value));
       this.gridView.draw();
-      this.syncGrid();
+      this.syncPattern();
     };
 
     const scaleSel = document.createElement("select");
@@ -342,23 +389,19 @@ export class App {
     scaleSel.onchange = () => {
       blk.scale = Number(scaleSel.value);
       this.gridView.draw();
-      this.syncGrid();
+      this.syncPattern();
     };
 
-    const loop = document.createElement("button");
-    loop.className = "loop-btn" + (blk.active ? " on" : "");
-    loop.textContent = blk.active ? "Loop ●" : "Loop ○";
-    loop.onclick = () => {
-      blk.active = !blk.active;
-      loop.className = "loop-btn" + (blk.active ? " on" : "");
-      loop.textContent = blk.active ? "Loop ●" : "Loop ○";
-      this.gridView.draw();
-      this.syncGrid();
-      // Refresh the tab's muted state.
-      this.render();
+    const add = document.createElement("button");
+    add.className = "add-loop-btn";
+    add.textContent = "+ Add to loop";
+    add.onclick = () => {
+      const slot = this.arr.addToLoop(this.workspace);
+      if (slot < 0) alert("Order list is full (20 slots).");
+      this.syncPattern();
     };
 
-    row.append(labelled("Root", rootSel), labelled("Scale", scaleSel), loop);
+    row.append(labelled("Root", rootSel), labelled("Scale", scaleSel), add);
     return row;
   }
 
@@ -382,6 +425,50 @@ export class App {
       row.append(b);
     }
     return row;
+  }
+
+  // --- order editor -----------------------------------------------------
+  private renderOrderEditor(): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "order-editor";
+
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Tap a slot to cycle through grids. The sequence plays top-left to bottom-right.";
+    wrap.append(hint);
+
+    const grid = document.createElement("div");
+    grid.className = "order-grid";
+    this.orderSlotEls = [];
+
+    for (let i = 0; i < ORDER_SLOTS; i++) {
+      const slot = document.createElement("button");
+      slot.className = "order-slot";
+      this.paintOrderSlot(slot, i);
+      slot.onclick = () => {
+        const cur = this.arr.order[i];
+        this.arr.order[i] = cur >= NUM_BLOCKS - 1 ? EMPTY : cur + 1;
+        this.paintOrderSlot(slot, i);
+        this.syncPattern();
+      };
+      this.orderSlotEls.push(slot);
+      grid.append(slot);
+    }
+    wrap.append(grid);
+    return wrap;
+  }
+
+  private paintOrderSlot(el: HTMLElement, i: number): void {
+    const g = this.arr.order[i];
+    if (g >= 0) {
+      el.style.background = GRID_COLORS[g];
+      el.textContent = String(g + 1);
+      el.classList.remove("empty");
+    } else {
+      el.style.background = "";
+      el.textContent = String(i + 1);
+      el.classList.add("empty");
+    }
   }
 
   // --- sound view -------------------------------------------------------
