@@ -1,8 +1,11 @@
-// Minimal offline cache: serve same-origin GETs from cache, refreshing in the
-// background (stale-while-revalidate). Enough to launch the installed PWA with
-// no network. Bump CACHE to force clients onto fresh assets.
+// Offline cache with sensible update behaviour:
+//  - HTML navigations are network-first, so a new deploy shows up on the next
+//    online reload (falling back to cache when offline).
+//  - Hashed assets are cache-first (their content-hash filename makes them
+//    immutable, so a cache hit is always correct).
+// Bump CACHE to force clients off old caches.
 
-const CACHE = "msq010-v1";
+const CACHE = "msq010-v2";
 
 self.addEventListener("install", () => self.skipWaiting());
 
@@ -20,17 +23,34 @@ self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET" || new URL(req.url).origin !== self.location.origin) return;
 
+  const isNavigation = req.mode === "navigate" || req.destination === "document";
+
+  if (isNavigation) {
+    // Network-first: always try for the freshest HTML when online.
+    e.respondWith(
+      (async () => {
+        const cache = await caches.open(CACHE);
+        try {
+          const res = await fetch(req);
+          cache.put(req, res.clone());
+          return res;
+        } catch {
+          return (await cache.match(req)) || (await cache.match("./index.html")) || Response.error();
+        }
+      })()
+    );
+    return;
+  }
+
+  // Cache-first for hashed/static assets.
   e.respondWith(
     (async () => {
       const cache = await caches.open(CACHE);
       const cached = await cache.match(req);
-      const network = fetch(req)
-        .then((res) => {
-          if (res && res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => null);
-      return cached || (await network) || Response.error();
+      if (cached) return cached;
+      const res = await fetch(req);
+      if (res && res.ok) cache.put(req, res.clone());
+      return res;
     })()
   );
 });
