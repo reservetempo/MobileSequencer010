@@ -1,13 +1,12 @@
-// Canvas paint grid for ONE melody block (16 steps x 7 rows). Touch-first:
+// Canvas paint grid for ONE melody block (8 steps x 7 rows). Touch-first:
 // tap/drag to paint the active drum, tap a painted cell of the active drum to
-// erase it (toggle, matching the desktop MelodyGridView). Draws note-name row
-// labels, 4-step separators, the playhead column, and dims muted blocks.
+// erase it (toggle, matching the desktop MelodyGridView). Draws 4-step
+// separators and the playhead column.
 
 import { MelodyGrid, NUM_ROWS, NUM_STEPS, EMPTY } from "../model/melodyGrid";
-import { noteNameForRow } from "../model/melodyScale";
 import { drumColour } from "../model/drums";
 
-const LABEL_W = 28; // px, row note labels
+const LABEL_W = 0; // no row labels
 const ROW_H = 40; // px per row (8-wide grid -> roughly square cells)
 
 export class GridView {
@@ -120,16 +119,8 @@ export class GridView {
 
     ctx.clearRect(0, 0, cssW, totalH);
 
-    ctx.font = "600 12px -apple-system, system-ui, sans-serif";
-    ctx.textBaseline = "middle";
-
     for (let row = 0; row < NUM_ROWS; row++) {
       const y = row * ROW_H;
-
-      // Row note label.
-      ctx.fillStyle = "#cdd2da";
-      ctx.textAlign = "right";
-      ctx.fillText(noteNameForRow(row, g.root, g.scale), LABEL_W - 5, y + ROW_H / 2);
 
       for (let step = 0; step < NUM_STEPS; step++) {
         const x = LABEL_W + step * this.cellW;

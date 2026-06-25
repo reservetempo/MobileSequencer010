@@ -126,12 +126,22 @@ button:active { transform: scale(0.97); }
 
 /* order editor */
 .order-editor { display: flex; flex-direction: column; gap: 12px; }
-.order-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
-.order-slot {
+
+.grid-palette { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.grid-swatch {
   aspect-ratio: 1;
   display: flex; align-items: center; justify-content: center;
   font-weight: 700; font-size: 16px; color: #15161a;
-  border: 1px solid var(--line); border-radius: 10px;
+  border: 2px solid transparent; border-radius: 10px;
+}
+.grid-swatch.on { border-color: var(--text); }
+
+.order-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.order-slot {
+  aspect-ratio: 1;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 20px; color: #15161a;
+  border: 1px solid var(--line); border-radius: 12px;
 }
 .order-slot.empty { color: var(--muted); background: var(--panel); font-weight: 500; }
 .order-slot.playing { outline: 3px solid var(--accent); outline-offset: -3px; }

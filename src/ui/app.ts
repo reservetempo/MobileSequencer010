@@ -33,6 +33,7 @@ export class App {
   private view: View = "grid";
   private selectedDrum: DrumType = DrumType.Kick;
   private workspace = 0; // 0..5 = grid index, ORDER_VIEW = order list
+  private orderBrush = 0; // which grid (colour) the order grid places
   private playing = false;
   private tempo = 120;
 
@@ -434,8 +435,10 @@ export class App {
 
     const hint = document.createElement("p");
     hint.className = "hint";
-    hint.textContent = "Tap a slot to cycle through grids. The sequence plays top-left to bottom-right.";
+    hint.textContent = "Pick a grid colour, then tap slots to place it. Plays top-left to bottom-right.";
     wrap.append(hint);
+
+    wrap.append(this.gridPalette());
 
     const grid = document.createElement("div");
     grid.className = "order-grid";
@@ -446,8 +449,8 @@ export class App {
       slot.className = "order-slot";
       this.paintOrderSlot(slot, i);
       slot.onclick = () => {
-        const cur = this.arr.order[i];
-        this.arr.order[i] = cur >= NUM_BLOCKS - 1 ? EMPTY : cur + 1;
+        // Toggle: placing the selected grid where it already is clears the slot.
+        this.arr.order[i] = this.arr.order[i] === this.orderBrush ? EMPTY : this.orderBrush;
         this.paintOrderSlot(slot, i);
         this.syncPattern();
       };
@@ -456,6 +459,25 @@ export class App {
     }
     wrap.append(grid);
     return wrap;
+  }
+
+  /** Colour swatches for the six grids; the selected one is the placing brush. */
+  private gridPalette(): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "grid-palette";
+    for (let g = 0; g < NUM_BLOCKS; g++) {
+      const b = document.createElement("button");
+      b.className = "grid-swatch" + (g === this.orderBrush ? " on" : "");
+      b.style.background = GRID_COLORS[g];
+      b.textContent = String(g + 1);
+      b.onclick = () => {
+        this.orderBrush = g;
+        row.querySelectorAll(".grid-swatch").forEach((el) => el.classList.remove("on"));
+        b.classList.add("on");
+      };
+      row.append(b);
+    }
+    return row;
   }
 
   private paintOrderSlot(el: HTMLElement, i: number): void {
