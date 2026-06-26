@@ -1,4 +1,4 @@
-// Maps the 7 rows of a melody grid to notes of a chosen key (root + scale) and,
+// Maps the 5 rows of a melody grid to notes of a chosen key (root + scale) and,
 // for a given drum, to the frequency it should play. Port of MelodyScale.h.
 //
 // The frequency mapping is duplicated in public/worklet/engine.js (which owns
@@ -9,7 +9,7 @@ import { DrumType } from "./drums";
 import { getParamSpec } from "./paramSpec";
 import { ParamId } from "./params";
 
-export const NUM_NOTES = 7; // rows per grid
+export const NUM_NOTES = 5; // rows per grid
 
 export enum ScaleType {
   Major = 0,

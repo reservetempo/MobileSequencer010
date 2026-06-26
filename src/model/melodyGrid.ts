@@ -1,10 +1,12 @@
-// The pattern data: six 8x7 melody grids plus a 20-slot "order" list that
-// determines the playback sequence. Each grid has an identity colour used in the
-// order view and the workspace picker. The loop plays the order list top to
-// bottom, playing each referenced grid's 8 steps, then repeats.
+// The pattern data: six 16-step melody patterns plus a 20-slot "order" list that
+// determines the playback sequence. Each pattern is 5 keys (rows) tall; the UI
+// draws its 16 steps as two stacked 8-wide grids so it fits a phone screen. Each
+// pattern has an identity colour used in the order view and the pattern picker.
+// The loop plays the order list top to bottom, playing each referenced pattern's
+// 16 steps, then repeats.
 
-export const NUM_ROWS = 7;
-export const NUM_STEPS = 8;
+export const NUM_ROWS = 5;
+export const NUM_STEPS = 16;
 export const NUM_BLOCKS = 6;
 export const ORDER_SLOTS = 20;
 export const EMPTY = -1;
