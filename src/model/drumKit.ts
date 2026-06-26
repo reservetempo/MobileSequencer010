@@ -95,16 +95,27 @@ export class DrumParameters {
     }
   }
 
-  /** Randomise ("Shuffle") every randomisable continuous param at once. Volume and
-      discrete "type" params are left alone. Each param is drawn uniformly from a
-      window: current lerped toward each edge of its live (preset) range by
-      `randomness`. */
+  /** Randomise ("Shuffle") every randomisable param at once (Volume is never
+      touched). Continuous params are drawn uniformly from a window: current lerped
+      toward each edge of its live (preset) range by `randomness`. Discrete "type"
+      params (Wave/Filter/LFO destinations) reroll to a random choice within their
+      preset range — locked when lo==hi, so a character preset only shuffles its LFO
+      destinations while Full Range also shuffles waves/filters. The shuffle amount
+      is the probability that each discrete param rerolls. */
   randomize(randomness: number): void {
     randomness = Math.min(1, Math.max(0, randomness));
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
       const s = getParamSpec(this.drum, id);
-      if (!s.randomizable || isDiscrete(s)) continue;
+      if (!s.randomizable) continue;
+      if (isDiscrete(s)) {
+        const lo = Math.round(this.lo[id]);
+        const hi = Math.round(this.hi[id]);
+        if (hi > lo && Math.random() < randomness) {
+          this.set(id, lo + Math.floor(Math.random() * (hi - lo + 1)));
+        }
+        continue;
+      }
       const cur = this.get(id);
       const lo = cur + (this.lo[id] - cur) * randomness;
       const hi = cur + (this.hi[id] - cur) * randomness;

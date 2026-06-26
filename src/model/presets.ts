@@ -8,6 +8,12 @@ import { DrumType } from "./drums";
 import { ParamId, NUM_PARAMS } from "./params";
 import { getParamSpec, baseSpec, isDiscrete } from "./paramSpec";
 
+// LFO destination params shuffle on every preset; other discrete "type" params
+// (Wave/Filter) only shuffle on Full Range (their range is locked otherwise).
+const LFO_TARGET_IDS = new Set<ParamId>([
+  ParamId.LfoTarget, ParamId.Lfo2Target, ParamId.Lfo3Target,
+]);
+
 export interface Preset {
   name: string;
   color: string; // tile colour in the preset grid
@@ -36,8 +42,12 @@ function presetForDrum(drum: DrumType, name: string, color: string): Preset {
   const ranges: { lo: number; hi: number }[] = [];
   const values: number[] = [];
   for (let i = 0; i < NUM_PARAMS; i++) {
-    const s = getParamSpec(drum, i as ParamId);
-    ranges.push({ lo: s.min, hi: s.max });
+    const id = i as ParamId;
+    const s = getParamSpec(drum, id);
+    // Lock a character's Wave/Filter type (range = its default) so Shuffle keeps it
+    // in character; LFO destinations and continuous params keep their full range.
+    if (isDiscrete(s) && !LFO_TARGET_IDS.has(id)) ranges.push({ lo: s.def, hi: s.def });
+    else ranges.push({ lo: s.min, hi: s.max });
     values.push(s.def);
   }
   return { name, color, ranges, values };
@@ -58,10 +68,13 @@ function fullRangePreset(): Preset {
   return { name: "Full Range", color: "#ffffff", values, ranges };
 }
 
+/** The widest-range preset, also the editor's default sound. */
+export const FULL_RANGE_PRESET: Preset = fullRangePreset();
+
 /** The full factory palette: one preset per drum character, then Full Range. */
 export const FACTORY_PRESETS: Preset[] = [
   ...PRESET_DRUMS.map((d) => presetForDrum(d.drum, d.name, d.color)),
-  fullRangePreset(),
+  FULL_RANGE_PRESET,
 ];
 
 /** The default preset a drum slot starts on (its own character). */

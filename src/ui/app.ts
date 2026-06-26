@@ -5,11 +5,12 @@
 // patterns play and in what order. Painted lanes are added from saved sounds.
 
 import { EngineHost, Playhead } from "../audio/engineHost";
-import { DRUMS, DrumType, drumColour, drumName } from "../model/drums";
+import { DRUMS, DrumType, drumColour } from "../model/drums";
 import { getParamSpec } from "../model/paramSpec";
 import { ParamId } from "../model/params";
 import { DrumKit } from "../model/drumKit";
-import { SoundLibrary } from "../model/soundLibrary";
+import { FULL_RANGE_PRESET } from "../model/presets";
+import { SoundLibrary, SavedSound } from "../model/soundLibrary";
 import { serialize, deserialize, ProjectJSON } from "../model/project";
 import {
   WipArrangement, NUM_BLOCKS, ORDER_SLOTS, EMPTY, GRID_COLORS,
@@ -18,12 +19,15 @@ import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
 import { GridView } from "./gridView";
 import { SoundView } from "./soundView";
 
-// A paint lane added from the saved-sound library: bound to a built-in drum
-// (so the engine knows which channel to trigger) plus the saved snapshot/name.
+// A paint lane added from the saved-sound library. Each lane gets its OWN engine
+// channel (`drum`) so several saved sounds can play at once, plus its own identity
+// colour and the Pitch range it maps melodies within.
 interface Lane {
-  drum: DrumType;
+  drum: number; // unique engine channel (0-11) this lane plays on
   name: string;
   snapshot: number[];
+  color: string;
+  pitch: [number, number]; // Pitch range for melody mapping
 }
 
 const PROJECT_KEY = "msq010.project";
@@ -79,21 +83,29 @@ export class App {
 
   // --- engine sync ------------------------------------------------------
   private pushAll(): void {
-    for (const d of DRUMS) this.engine.setParams(d.type, this.kit.get(d.type).capture());
+    // The editor voice (selectedDrum) + every lane on its own channel.
+    this.engine.setParams(this.selectedDrum, this.kit.get(this.selectedDrum).capture());
+    this.pushLanes();
     this.pushPitchRanges();
     this.syncPattern();
     this.engine.setTempo(this.tempo);
   }
 
-  /** Send every drum's Pitch range for the melody mapping. Active slots use their
-      live (preset) range; the rest fall back to the static per-drum spec. */
+  /** Push each lane's snapshot to its own engine channel. */
+  private pushLanes(): void {
+    for (const lane of this.lanes) this.engine.setParams(lane.drum, lane.snapshot);
+  }
+
+  /** Send Pitch ranges for the melody mapping: the editor voice + each lane use
+      their live range; unused channels fall back to the static per-drum spec. */
   private pushPitchRanges(): void {
     const ranges: (number[] | null)[] = [];
     for (let i = 0; i < 12; i++) {
       const sp = getParamSpec(i as DrumType, ParamId.Pitch);
       ranges[i] = [sp.min, sp.max];
     }
-    for (const d of this.drumTypes) ranges[d] = this.kit.pitchRange(d);
+    ranges[this.selectedDrum] = this.kit.pitchRange(this.selectedDrum);
+    for (const lane of this.lanes) ranges[lane.drum] = [lane.pitch[0], lane.pitch[1]];
     this.engine.setPitchRanges(ranges);
   }
 
@@ -125,16 +137,17 @@ export class App {
     }, 300);
   }
 
-  private loadFromStorage(): void {
+  private loadFromStorage(): boolean {
     try {
       const raw = localStorage.getItem(PROJECT_KEY);
-      if (!raw) return;
+      if (!raw) return false;
       const json = JSON.parse(raw) as ProjectJSON;
       this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanes);
       this.soundName = json.soundName ?? this.soundName;
       this.activeLane = this.lanes.length ? 0 : -1;
+      return true;
     } catch {
-      /* ignore corrupt storage */
+      return false; // ignore corrupt storage
     }
   }
 
@@ -168,6 +181,7 @@ export class App {
   private newProject(): void {
     this.arr = new WipArrangement();
     this.kit = new DrumKit(this.drumTypes);
+    this.kit.applyPreset(this.selectedDrum, FULL_RANGE_PRESET); // default editor sound
     this.tempo = 120;
     this.soundName = "Sound01";
     this.lanes = [];
@@ -189,6 +203,23 @@ export class App {
     this.engine.trigger(drum, this.kit.get(drum).capture(), gate);
   }
 
+  /** Preview a lane on its own channel (lanes aren't in the editable kit). */
+  private auditionLane(lane: Lane): void {
+    const gate = Math.round(this.engine.sampleRate * 0.4);
+    this.engine.trigger(lane.drum, lane.snapshot, gate);
+  }
+
+  /** After saving a sound: reset the editor to the default Full Range / Sound01. */
+  private revertEditorToDefault(): void {
+    this.kit.applyPreset(this.selectedDrum, FULL_RANGE_PRESET);
+    this.soundName = "Sound01";
+    this.engine.setParams(this.selectedDrum, this.kit.get(this.selectedDrum).capture());
+    this.pushPitchRanges();
+    this.audition(this.selectedDrum);
+    this.persist();
+    this.render();
+  }
+
   // --- start gate -------------------------------------------------------
   private renderStart(): void {
     this.root.innerHTML = "";
@@ -201,7 +232,8 @@ export class App {
     btn.textContent = "▶ Start";
     btn.onclick = async () => {
       await this.engine.start();
-      this.loadFromStorage();
+      // Fresh session (no saved project): default the editor sound to Full Range.
+      if (!this.loadFromStorage()) this.kit.applyPreset(this.selectedDrum, FULL_RANGE_PRESET);
       this.pushAll();
       this.render();
     };
@@ -333,6 +365,8 @@ export class App {
       gridWrap.className = "grid-wrap";
       this.gridView.setBlock(this.arr.blocks[this.workspace]);
       this.gridView.setActiveDrum(this.activeDrumForPaint());
+      // Colour painted cells by the lane that owns that channel.
+      this.gridView.colorForDrum = (ch) => this.lanes.find((l) => l.drum === ch)?.color ?? drumColour(ch);
       gridWrap.append(this.gridView.canvas);
       v.append(gridWrap);
 
@@ -426,7 +460,7 @@ export class App {
       b.className = "drum-pad" + (i === this.activeLane ? " on" : "");
       const sw = document.createElement("span");
       sw.className = "swatch";
-      sw.style.background = drumColour(lane.drum);
+      sw.style.background = lane.color;
       const name = document.createElement("span");
       name.textContent = lane.name;
       b.append(sw, name);
@@ -457,22 +491,29 @@ export class App {
     this.activeLane = i;
     const lane = this.lanes[i];
     if (!lane) return;
-    // Make the lane's saved sound the live voice for its drum, then preview it.
-    this.kit.get(lane.drum).restore(lane.snapshot);
-    this.engine.setParams(lane.drum, this.kit.get(lane.drum).capture());
+    // The lane already owns its channel + params; just paint with it and preview.
+    this.engine.setParams(lane.drum, lane.snapshot);
     this.gridView.setActiveDrum(lane.drum);
-    this.audition(lane.drum);
+    this.auditionLane(lane);
     this.persist();
     this.render();
   }
 
   private removeLane(i: number): void {
-    this.lanes.splice(i, 1);
+    this.lanes.splice(i, 1); // frees the channel for the next added sound
     if (this.activeLane === i) this.activeLane = -1; // nothing selected to paint
     else if (this.activeLane > i) this.activeLane -= 1;
     this.gridView.setActiveDrum(this.activeDrumForPaint());
+    this.pushPitchRanges();
     this.persist();
     this.render();
+  }
+
+  /** First engine channel (0-11) not used by the editor voice or another lane. */
+  private nextFreeChannel(): number {
+    const used = new Set<number>([this.selectedDrum, ...this.lanes.map((l) => l.drum)]);
+    for (let c = 0; c < 12; c++) if (!used.has(c)) return c;
+    return -1;
   }
 
   /** Popup of every saved sound across drums; choosing one adds it as a lane. */
@@ -483,30 +524,24 @@ export class App {
     const panel = document.createElement("div");
     panel.className = "sound-picker";
 
-    const items: { drum: DrumType; name: string; snapshot: number[] }[] = [];
-    for (const d of DRUMS) {
-      for (const s of this.library.list(d.type)) {
-        items.push({ drum: d.type, name: s.name, snapshot: s.snapshot });
-      }
-    }
-
+    const items = this.library.all();
     if (items.length === 0) {
       const empty = document.createElement("p");
       empty.className = "hint";
-      empty.textContent = "No saved sounds yet. Save some in the Sound view.";
+      empty.textContent = "No saved sounds yet. Save some in the Sounds view.";
       panel.append(empty);
     } else {
       for (const it of items) {
         const b = document.createElement("button");
         const sw = document.createElement("span");
         sw.className = "swatch";
-        sw.style.background = drumColour(it.drum);
+        sw.style.background = it.color;
         const name = document.createElement("span");
-        name.textContent = `${it.name} · ${drumName(it.drum)}`;
+        name.textContent = it.name;
         b.append(sw, name);
         b.onclick = () => {
           panel.remove();
-          this.addLane(it.drum, it.name, it.snapshot);
+          this.addLane(it);
         };
         panel.append(b);
       }
@@ -523,8 +558,19 @@ export class App {
     setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
   }
 
-  private addLane(drum: DrumType, name: string, snapshot: number[]): void {
-    this.lanes.push({ drum, name, snapshot: snapshot.slice() });
+  private addLane(sound: SavedSound): void {
+    const channel = this.nextFreeChannel();
+    if (channel < 0) { alert("Maximum number of sounds reached."); return; }
+    const lane: Lane = {
+      drum: channel,
+      name: sound.name,
+      snapshot: sound.snapshot.slice(),
+      color: sound.color,
+      pitch: [sound.pitch[0], sound.pitch[1]],
+    };
+    this.lanes.push(lane);
+    this.engine.setParams(channel, lane.snapshot);
+    this.pushPitchRanges();
     this.selectLane(this.lanes.length - 1);
   }
 
@@ -618,6 +664,7 @@ export class App {
       },
       onAudition: (d) => this.audition(d),
       onRename: (name) => { this.soundName = name; this.persist(); },
+      onSaved: () => this.revertEditorToDefault(),
     });
 
     v.append(sound.el);

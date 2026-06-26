@@ -24,6 +24,9 @@ export class GridView {
   /** Called after a cell edit so the host can resend the grid to the engine. */
   onEdit: (() => void) | null = null;
 
+  /** Cell fill colour for a channel index. Host overrides this to colour by lane. */
+  colorForDrum: (drum: number) => string = drumColour;
+
   private cellW = 20;
   private painting = false;
   private erase = false;
@@ -166,7 +169,7 @@ export class GridView {
           x + CELL_PAD, y + CELL_PAD,
           this.cellW - CELL_PAD * 2, ROW_H - CELL_PAD * 2, RADIUS,
         );
-        ctx.fillStyle = drum >= 0 ? drumColour(drum) : "#23252b";
+        ctx.fillStyle = drum >= 0 ? this.colorForDrum(drum) : "#23252b";
         ctx.fill();
         if (isBarStart) {
           ctx.strokeStyle = "#3a3d46";

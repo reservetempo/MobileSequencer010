@@ -24,7 +24,14 @@ export interface SoundViewCallbacks {
   onRangeChange: (drum: DrumType) => void; // ranges changed -> resend pitch ranges
   onAudition: (drum: DrumType) => void;    // preview the sound
   onRename: (name: string) => void;        // the current sound's name changed
+  onSaved: () => void;                     // a sound was saved -> revert to default
 }
+
+// Swatches offered when saving a sound (its identity colour on the grid).
+const SAVE_PALETTE = [
+  "#ff3b30", "#ff9f0a", "#ffd60a", "#34c759", "#00ffc8", "#64d2ff",
+  "#0a84ff", "#6c5cff", "#bf5af2", "#ff6482", "#ff7ab8", "#a2845e",
+];
 
 export class SoundView {
   readonly el = document.createElement("div");
@@ -91,25 +98,117 @@ export class SoundView {
     const presetBtn = mkBtn("Presets", "cat-btn");
     presetBtn.onclick = () => this.openPresetGrid(presetBtn);
 
+    const savedBtn = mkBtn("Saved", "cat-btn");
+    savedBtn.onclick = () => this.openSavedList(savedBtn);
+
     const current = document.createElement("span");
     current.className = "preset-current";
     current.textContent = this.params().presetName();
 
-    // Save the current sound to the library under its name (set in the title field).
+    // Save the current sound to the library: pick a colour, store it, then revert.
     const save = mkBtn("Save", "cat-btn");
-    save.onclick = () => {
-      const name = this.soundName.trim();
-      if (!name) return;
-      this.library.add(this.drum, name, this.params().capture());
-      save.textContent = "Saved";
-      setTimeout(() => { save.textContent = "Save"; }, 900);
-    };
+    save.onclick = () => this.openSaveColors(save);
 
-    row.append(current, presetBtn, save);
+    row.append(current, presetBtn, savedBtn, save);
     return row;
   }
 
-  // Grid overlay of every factory preset + this drum's saved sounds.
+  // Colour picker shown on Save; choosing a swatch stores the sound and reverts.
+  private openSaveColors(anchor: HTMLElement): void {
+    const existing = this.el.querySelector(".save-colors");
+    if (existing) { existing.remove(); return; }
+
+    const name = this.soundName.trim() || "Sound01";
+    const panel = document.createElement("div");
+    panel.className = "save-colors";
+    const label = document.createElement("div");
+    label.className = "save-colors-label";
+    label.textContent = `Save "${name}" as:`;
+    panel.append(label);
+
+    const grid = document.createElement("div");
+    grid.className = "save-colors-grid";
+    for (const color of SAVE_PALETTE) {
+      const sw = document.createElement("button");
+      sw.className = "save-swatch";
+      sw.style.background = color;
+      sw.onclick = () => {
+        panel.remove();
+        this.library.add(this.drum, name, this.params().capture(), color, this.kit.pitchRange(this.drum));
+        this.cb.onSaved(); // app reverts editor to Full Range + Sound01 and re-renders
+      };
+      grid.append(sw);
+    }
+    panel.append(grid);
+
+    anchor.parentElement?.append(panel);
+    const close = (ev: PointerEvent) => {
+      if (!panel.contains(ev.target as Node) && ev.target !== anchor) {
+        panel.remove();
+        document.removeEventListener("pointerdown", close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+  }
+
+  // List of saved sounds: tap to load into the editor, × to delete.
+  private openSavedList(anchor: HTMLElement): void {
+    const existing = this.el.querySelector(".saved-list");
+    if (existing) { existing.remove(); return; }
+
+    const panel = document.createElement("div");
+    panel.className = "saved-list";
+
+    const render = () => {
+      panel.innerHTML = "";
+      const saved = this.library.list(this.drum);
+      if (saved.length === 0) {
+        const hint = document.createElement("p");
+        hint.className = "hint";
+        hint.textContent = "No saved sounds yet. Design one and tap Save.";
+        panel.append(hint);
+        return;
+      }
+      for (const s of saved) {
+        const item = document.createElement("div");
+        item.className = "saved-item";
+        const load = document.createElement("button");
+        load.className = "saved-load";
+        const sw = document.createElement("span");
+        sw.className = "swatch";
+        sw.style.background = s.color;
+        const name = document.createElement("span");
+        name.textContent = s.name;
+        load.append(sw, name);
+        load.onclick = () => {
+          panel.remove();
+          this.params().restore(s.snapshot);
+          this.soundName = s.name;
+          this.cb.onRename(s.name);
+          this.afterReplace();
+        };
+        const del = document.createElement("button");
+        del.className = "saved-del";
+        del.textContent = "×";
+        del.title = "Delete sound";
+        del.onclick = () => { this.library.remove(this.drum, s.name); render(); };
+        item.append(load, del);
+        panel.append(item);
+      }
+    };
+    render();
+
+    anchor.parentElement?.append(panel);
+    const close = (ev: PointerEvent) => {
+      if (!panel.contains(ev.target as Node) && ev.target !== anchor) {
+        panel.remove();
+        document.removeEventListener("pointerdown", close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+  }
+
+  // Grid overlay of every factory preset.
   private openPresetGrid(anchor: HTMLElement): void {
     const existing = this.el.querySelector(".preset-grid");
     if (existing) { existing.remove(); return; }
@@ -132,20 +231,6 @@ export class SoundView {
 
     for (const p of FACTORY_PRESETS) {
       addTile(p.name, p.color, () => this.applyPreset(p));
-    }
-
-    const saved = this.library.list(this.drum);
-    if (saved.length) {
-      const sep = document.createElement("div");
-      sep.className = "preset-grid-sep";
-      sep.textContent = "Saved";
-      panel.append(sep);
-      for (const s of saved) {
-        addTile(s.name, null, () => {
-          this.params().restore(s.snapshot);
-          this.afterReplace();
-        });
-      }
     }
 
     anchor.parentElement?.append(panel);

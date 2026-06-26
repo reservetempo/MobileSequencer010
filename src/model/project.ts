@@ -5,11 +5,13 @@ import { DrumType } from "./drums";
 import { DrumKit } from "./drumKit";
 import { WipArrangement, NUM_BLOCKS, NUM_ROWS, NUM_STEPS, ORDER_SLOTS, EMPTY } from "./melodyGrid";
 
-// A Steps-view paint lane: a saved sound bound to a drum (see app.ts Lane).
+// A Steps-view paint lane: a saved sound on its own channel (see app.ts Lane).
 export interface LaneJSON {
-  drum: number;
+  drum: number; // the lane's engine channel
   name: string;
   snapshot: number[];
+  color?: string; // absent in older saves
+  pitch?: [number, number]; // absent in older saves
 }
 
 export interface ProjectJSON {
@@ -46,7 +48,9 @@ export function serialize(
     ranges: drumRanges,
     presets: drumPresets,
     soundName,
-    lanes: lanes.map((l) => ({ drum: l.drum, name: l.name, snapshot: l.snapshot.slice() })),
+    lanes: lanes.map((l) => ({
+      drum: l.drum, name: l.name, snapshot: l.snapshot.slice(), color: l.color, pitch: l.pitch,
+    })),
   };
 }
 
@@ -61,7 +65,14 @@ export function deserialize(
 
   for (const l of json.lanes ?? []) {
     if (l && Array.isArray(l.snapshot)) {
-      lanes.push({ drum: l.drum, name: String(l.name ?? ""), snapshot: l.snapshot.slice() });
+      const pitchVal = l.snapshot[0] ?? 200; // ParamId.Pitch = 0
+      lanes.push({
+        drum: l.drum,
+        name: String(l.name ?? ""),
+        snapshot: l.snapshot.slice(),
+        color: l.color ?? "#888888",
+        pitch: Array.isArray(l.pitch) && l.pitch.length === 2 ? [l.pitch[0], l.pitch[1]] : [pitchVal * 0.5, pitchVal * 2],
+      });
     }
   }
 
