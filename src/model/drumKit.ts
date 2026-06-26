@@ -1,68 +1,113 @@
-// Editable, stateful drum parameters + per-category randomise/undo controls.
+// Editable, stateful drum parameters + global randomise/undo controls.
 // Port of DrumParameters.cpp + DrumKit.h (minus the Markov "Evolve", which was
-// never implemented in the C++ either).
+// never implemented in the C++ either). Each drum now also carries a live shuffle
+// window (lo/hi per param) that a preset sets — so any slot can take on any
+// character and "Full Range" can open the window wide.
 
 import { DrumType } from "./drums";
-import { ParamId, ParamGroup, NUM_PARAMS, getParamGroup } from "./params";
-import { getParamSpec, defaultSnapshot, isDiscrete } from "./paramSpec";
+import { ParamId, NUM_PARAMS } from "./params";
+import { getParamSpec, baseRange, isDiscrete } from "./paramSpec";
+import { Preset, defaultPresetFor, FACTORY_PRESETS } from "./presets";
 
 export type Snapshot = number[];
 
 export class DrumParameters {
   readonly drum: DrumType;
-  private values: number[];
+  private values: number[] = new Array(NUM_PARAMS).fill(0);
+  private lo: number[] = new Array(NUM_PARAMS).fill(0);
+  private hi: number[] = new Array(NUM_PARAMS).fill(1);
+  private preset: Preset; // the last applied preset, used by Reset
 
   constructor(drum: DrumType) {
     this.drum = drum;
-    this.values = defaultSnapshot(drum);
+    this.preset = defaultPresetFor(drum);
+    this.applyPreset(this.preset);
   }
 
   get(id: ParamId): number {
     return this.values[id];
   }
 
-  /** Write a value, clamped to this drum's legal range. */
+  /** Write a value, clamped to this param's ABSOLUTE range (baseSpec). Manual entry
+      can therefore exceed the active preset's window without breaking the engine. */
   set(id: ParamId, value: number): void {
-    const s = getParamSpec(this.drum, id);
-    this.values[id] = Math.min(s.max, Math.max(s.min, value));
+    const r = baseRange(id);
+    this.values[id] = Math.min(r.max, Math.max(r.min, value));
+  }
+
+  /** Current shuffle window for a param (the active preset's range). */
+  loOf(id: ParamId): number { return this.lo[id]; }
+  hiOf(id: ParamId): number { return this.hi[id]; }
+  presetName(): string { return this.preset.name; }
+
+  /** Apply a preset: set the shuffle window AND the values it carries. */
+  applyPreset(p: Preset): void {
+    this.preset = p;
+    for (let i = 0; i < NUM_PARAMS; i++) {
+      const id = i as ParamId;
+      const r = baseRange(id);
+      const lo = p.ranges[i]?.lo ?? r.min;
+      const hi = p.ranges[i]?.hi ?? r.max;
+      this.lo[id] = Math.min(r.max, Math.max(r.min, lo));
+      this.hi[id] = Math.min(r.max, Math.max(r.min, hi));
+      this.set(id, p.values[i] ?? getParamSpec(this.drum, id).def);
+    }
+  }
+
+  /** Adopt a preset as the "active" one for the label + Reset target, WITHOUT
+      touching current values/ranges (used on load to restore the saved name). */
+  adoptPreset(p: Preset): void {
+    this.preset = p;
+  }
+
+  /** Reset values back to the active preset's values (keeps its ranges). */
+  resetToPreset(): void {
+    for (let i = 0; i < NUM_PARAMS; i++) {
+      const id = i as ParamId;
+      this.set(id, this.preset.values[i] ?? getParamSpec(this.drum, id).def);
+    }
   }
 
   capture(): Snapshot {
     return this.values.slice();
   }
 
+  /** Restore values from a snapshot. Tolerates short (pre-LFO2/3) snapshots by
+      filling any missing tail with the param default. */
   restore(snap: Snapshot): void {
-    for (let i = 0; i < NUM_PARAMS; i++) this.set(i as ParamId, snap[i]);
-  }
-
-  resetGroup(group: ParamGroup): void {
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
-      if (getParamGroup(id) === group) this.set(id, getParamSpec(this.drum, id).def);
+      const v = snap[i];
+      this.set(id, v === undefined || Number.isNaN(v) ? getParamSpec(this.drum, id).def : v);
     }
   }
 
-  restoreGroup(snap: Snapshot, group: ParamGroup): void {
+  captureRanges(): { lo: number[]; hi: number[] } {
+    return { lo: this.lo.slice(), hi: this.hi.slice() };
+  }
+
+  restoreRanges(lo: number[], hi: number[]): void {
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
-      if (getParamGroup(id) === group) this.set(id, snap[i]);
+      const r = baseRange(id);
+      if (lo[i] !== undefined) this.lo[id] = Math.min(r.max, Math.max(r.min, lo[i]));
+      if (hi[i] !== undefined) this.hi[id] = Math.min(r.max, Math.max(r.min, hi[i]));
     }
   }
 
-  /** Randomise ("Shuffle"). Volume is never touched; discrete "type" params are
-      left alone (change those by hand). Each continuous param is drawn uniformly
-      from a window: current lerped toward each range edge by `randomness`. */
-  randomize(randomness: number, groupMask: number): void {
+  /** Randomise ("Shuffle") every randomisable continuous param at once. Volume and
+      discrete "type" params are left alone. Each param is drawn uniformly from a
+      window: current lerped toward each edge of its live (preset) range by
+      `randomness`. */
+  randomize(randomness: number): void {
     randomness = Math.min(1, Math.max(0, randomness));
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
       const s = getParamSpec(this.drum, id);
-      if (!s.randomizable) continue;
-      if ((groupMask & (1 << getParamGroup(id))) === 0) continue;
-      if (isDiscrete(s)) continue;
+      if (!s.randomizable || isDiscrete(s)) continue;
       const cur = this.get(id);
-      const lo = cur + (s.min - cur) * randomness;
-      const hi = cur + (s.max - cur) * randomness;
+      const lo = cur + (this.lo[id] - cur) * randomness;
+      const hi = cur + (this.hi[id] - cur) * randomness;
       this.set(id, lo + Math.random() * (hi - lo));
     }
   }
@@ -70,10 +115,13 @@ export class DrumParameters {
 
 const MAX_UNDO = 20;
 
+// One undo entry captures the full editable state (values + ranges) so undoing a
+// preset change or shuffle is exact.
+interface UndoState { values: number[]; lo: number[]; hi: number[]; }
+
 export class DrumKit {
   private params = new Map<DrumType, DrumParameters>();
-  // Per (drum, group) undo stack of snapshots.
-  private undo = new Map<string, Snapshot[]>();
+  private undo = new Map<DrumType, UndoState[]>(); // per-drum undo stack
 
   constructor(drums: DrumType[]) {
     for (const d of drums) this.params.set(d, new DrumParameters(d));
@@ -83,39 +131,56 @@ export class DrumKit {
     return this.params.get(drum)!;
   }
 
-  private key(drum: DrumType, g: ParamGroup): string {
-    return `${drum}:${g}`;
+  /** Live Pitch range for melody mapping (reflects the applied preset). */
+  pitchRange(drum: DrumType): [number, number] {
+    const p = this.get(drum);
+    return [p.loOf(ParamId.Pitch), p.hiOf(ParamId.Pitch)];
   }
 
-  private pushUndo(drum: DrumType, g: ParamGroup): void {
-    const k = this.key(drum, g);
-    const stack = this.undo.get(k) ?? [];
-    stack.push(this.get(drum).capture());
+  private pushUndo(drum: DrumType): void {
+    const stack = this.undo.get(drum) ?? [];
+    const p = this.get(drum);
+    const r = p.captureRanges();
+    stack.push({ values: p.capture(), lo: r.lo, hi: r.hi });
     if (stack.length > MAX_UNDO) stack.shift();
-    this.undo.set(k, stack);
+    this.undo.set(drum, stack);
   }
 
-  shuffleCategory(drum: DrumType, g: ParamGroup, randomness: number): void {
-    this.pushUndo(drum, g);
-    this.get(drum).randomize(randomness, 1 << g);
+  shuffleAll(drum: DrumType, randomness: number): void {
+    this.pushUndo(drum);
+    this.get(drum).randomize(randomness);
   }
 
-  resetCategory(drum: DrumType, g: ParamGroup): void {
-    this.pushUndo(drum, g);
-    this.get(drum).resetGroup(g);
+  resetAll(drum: DrumType): void {
+    this.pushUndo(drum);
+    this.get(drum).resetToPreset();
   }
 
-  canBack(drum: DrumType, g: ParamGroup): boolean {
-    const stack = this.undo.get(this.key(drum, g));
+  applyPreset(drum: DrumType, preset: Preset): void {
+    this.pushUndo(drum);
+    this.get(drum).applyPreset(preset);
+  }
+
+  /** Restore which preset is "active" by name (for the label/Reset after a load).
+      No-op if the name isn't a known factory preset. */
+  adoptPresetByName(drum: DrumType, name: string): void {
+    const p = FACTORY_PRESETS.find((x) => x.name === name);
+    if (p) this.get(drum).adoptPreset(p);
+  }
+
+  canBack(drum: DrumType): boolean {
+    const stack = this.undo.get(drum);
     return !!stack && stack.length > 0;
   }
 
-  /** Step one category back to its previous state. Returns false if nothing to undo. */
-  backCategory(drum: DrumType, g: ParamGroup): boolean {
-    const stack = this.undo.get(this.key(drum, g));
+  /** Step one drum back to its previous state. Returns false if nothing to undo. */
+  backAll(drum: DrumType): boolean {
+    const stack = this.undo.get(drum);
     if (!stack || stack.length === 0) return false;
-    const snap = stack.pop()!;
-    this.get(drum).restoreGroup(snap, g);
+    const s = stack.pop()!;
+    const p = this.get(drum);
+    p.restore(s.values);
+    p.restoreRanges(s.lo, s.hi);
     return true;
   }
 }

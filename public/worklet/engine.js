@@ -20,15 +20,21 @@ const P = {
   LfoTarget: 13, LfoRate: 14, LfoDepth: 15,
   Drive: 16, EchoTime: 17, EchoFeedback: 18, EchoMix: 19,
   ReverbSize: 20, ReverbMix: 21, Volume: 22,
+  // LFO 2 & 3 (appended after Volume; see ParamId in src/model/params.ts).
+  Lfo2Target: 23, Lfo2Rate: 24, Lfo2Depth: 25,
+  Lfo3Target: 26, Lfo3Rate: 27, Lfo3Depth: 28,
 };
+
+// LFO destination indices, in sync with LFO_TARGETS in src/model/paramSpec.ts.
+const LFO_PITCH = 0, LFO_FILTER = 1, LFO_AMP = 2, LFO_DRIVE = 3, LFO_RESO = 4, LFO_WAVE = 5;
 
 const NUM_DRUMS = 12;
 const NUM_VOICES = 6;
 const VOICE_GAIN = 0.9;
 const TWO_PI = Math.PI * 2;
 
-const NUM_ROWS = 7;
-const NUM_STEPS = 8;
+const NUM_ROWS = 5;
+const NUM_STEPS = 16;
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
@@ -36,7 +42,7 @@ const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 // Melody scale -> frequency (port of MelodyScale.h / melodyScale.ts). Owns the
 // pitch mapping because the clock lives here. Keep intervals in sync with
 // src/model/melodyScale.ts.
-const NUM_NOTES = 7;
+const NUM_NOTES = 5;
 const SCALE_INTERVALS = [
   [0, 2, 4, 5, 7, 9, 11], // Major
   [0, 2, 3, 5, 7, 8, 10], // Minor
@@ -138,7 +144,11 @@ class Voice {
     this.adsr = new ADSR();
     this.filter = new SVF();
     this.rng = makeRng((Math.random() * 4294967296) >>> 0);
-    this.oscPhase = 0; this.lfoPhase = 0; this.pitchEnv = 0; this.pitchEnvCoef = 0;
+    this.oscPhase = 0; this.pitchEnv = 0; this.pitchEnvCoef = 0;
+    this.lfoPhase = [0, 0, 0];
+    this.lfoTargets = [0, 0, 0];
+    this.lfoRates = [0, 0, 0];
+    this.lfoDepths = [0, 0, 0];
     this.gateSamples = 0; this.samplesPlayed = 0; this.noteOffSent = false;
   }
   start(s, gate) {
@@ -151,9 +161,11 @@ class Voice {
     this.filterType = Math.round(s[P.FilterType]);
     this.filterCutoff = s[P.FilterCutoff];
     this.filterReso = Math.max(0.3, s[P.FilterReso]);
-    this.lfoTarget = Math.round(s[P.LfoTarget]);
-    this.lfoRate = s[P.LfoRate];
-    this.lfoDepth = s[P.LfoDepth];
+    // Three independent always-on LFOs, each routed by its own destination.
+    this.lfoTargets = [Math.round(s[P.LfoTarget]), Math.round(s[P.Lfo2Target]), Math.round(s[P.Lfo3Target])];
+    this.lfoRates = [s[P.LfoRate], s[P.Lfo2Rate], s[P.Lfo3Rate]];
+    this.lfoDepths = [s[P.LfoDepth], s[P.Lfo2Depth], s[P.Lfo3Depth]];
+    this.lfoPhase = [0, 0, 0];
     this.drive = s[P.Drive];
 
     this.adsr.setParameters(
@@ -164,7 +176,7 @@ class Voice {
       this.sr
     );
 
-    this.oscPhase = 0; this.lfoPhase = 0; this.pitchEnv = 1;
+    this.oscPhase = 0; this.pitchEnv = 1;
     this.pitchEnvCoef = Math.exp(-1 / (this.pitchEnvDecay * this.sr));
     this.filter.reset();
     this.samplesPlayed = 0; this.noteOffSent = false;
@@ -172,9 +184,10 @@ class Voice {
     this.adsr.noteOn();
     this.active = true;
   }
-  osc(phase, wave) {
+  // `pw` is the square-wave duty cycle (0..1, 0.5 = symmetric); ignored by sine/tri.
+  osc(phase, wave, pw) {
     if (wave === 1) return 2 * Math.abs(2 * (phase - Math.floor(phase + 0.5))) - 1; // triangle
-    if (wave === 2) return phase < 0.5 ? 1 : -1;                                    // square
+    if (wave === 2) return phase < pw ? 1 : -1;                                     // square
     return Math.sin(TWO_PI * phase);                                               // sine
   }
   renderAdding(out, n) {
@@ -182,34 +195,43 @@ class Voice {
     const sr = this.sr;
     const nyquist = sr * 0.5;
     for (let i = 0; i < n; i++) {
-      const lfo = Math.sin(TWO_PI * this.lfoPhase);
-      this.lfoPhase += this.lfoRate / sr;
-      if (this.lfoPhase >= 1) this.lfoPhase -= 1;
+      // Evaluate the three LFOs and fold each into its destination's modulator.
+      let pitchMul = 1, cutoffMul = 1, ampMul = 1, resoMul = 1, driveAdd = 0, pwOff = 0;
+      for (let L = 0; L < 3; L++) {
+        const depth = this.lfoDepths[L];
+        const v = Math.sin(TWO_PI * this.lfoPhase[L]); // -1..1
+        this.lfoPhase[L] += this.lfoRates[L] / sr;     // advance even when silent
+        if (this.lfoPhase[L] >= 1) this.lfoPhase[L] -= 1;
+        if (depth <= 0) continue;
+        switch (this.lfoTargets[L]) {
+          case LFO_PITCH:  pitchMul  *= Math.pow(2, v * depth * 0.5); break;
+          case LFO_FILTER: cutoffMul *= Math.pow(2, v * depth * 2);   break;
+          case LFO_AMP:    ampMul    *= 1 - depth * (0.5 * (1 - v));   break;
+          case LFO_DRIVE:  driveAdd  += v * depth;                     break;
+          case LFO_RESO:   resoMul   *= Math.pow(2, v * depth);        break;
+          case LFO_WAVE:   pwOff     += v * depth * 0.45;              break;
+        }
+      }
 
-      let freq = this.basePitch * (1 + this.pitchEnvAmount * this.pitchEnv);
-      if (this.lfoTarget === 0) freq *= Math.pow(2, lfo * this.lfoDepth * 0.5);
+      let freq = this.basePitch * (1 + this.pitchEnvAmount * this.pitchEnv) * pitchMul;
       this.pitchEnv *= this.pitchEnvCoef;
 
-      const osc = this.osc(this.oscPhase, this.waveform);
+      const osc = this.osc(this.oscPhase, this.waveform, clamp(0.5 + pwOff, 0.05, 0.95));
       const noise = this.rng();
       const mixed = this.toneLevel * osc + this.noiseLevel * noise;
 
       this.oscPhase += freq / sr;
       if (this.oscPhase >= 1) this.oscPhase -= Math.floor(this.oscPhase);
 
-      let cutoff = this.filterCutoff;
-      if (this.lfoTarget === 1) cutoff *= Math.pow(2, lfo * this.lfoDepth * 2);
-      cutoff = clamp(cutoff, 20, nyquist * 0.99);
-
+      const cutoff = clamp(this.filterCutoff * cutoffMul, 20, nyquist * 0.99);
       const g = Math.tan(Math.PI * cutoff / sr);
-      const k = 1 / this.filterReso;
+      const k = 1 / clamp(this.filterReso * resoMul, 0.3, 20);
       let filtered = this.filter.process(mixed, g, k, this.filterType);
 
-      if (this.drive > 0) filtered = Math.tanh(filtered * (1 + this.drive * 5));
+      const drive = clamp(this.drive + driveAdd, 0, 2);
+      if (drive > 0) filtered = Math.tanh(filtered * (1 + drive * 5));
 
-      let env = this.adsr.next();
-      if (this.lfoTarget === 2) env *= 1 - this.lfoDepth * (0.5 * (1 - lfo));
-
+      const env = this.adsr.next() * ampMul;
       out[i] += filtered * env * VOICE_GAIN;
 
       if (!this.noteOffSent && ++this.samplesPlayed >= this.gateSamples) {
@@ -425,7 +447,7 @@ class EngineProcessor extends AudioWorkletProcessor {
   }
 
   // Fire one step of the ordered sequence: walk the 20-slot order list, play each
-  // referenced grid's 8 columns, looping. Each painted row triggers pitched to
+  // referenced pattern's 16 columns, looping. Each painted row triggers pitched to
   // its grid's key. Staged edits are promoted only at the loop boundary.
   fireStep(gate) {
     const blocks = this.blocks;

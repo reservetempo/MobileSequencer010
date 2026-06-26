@@ -26,6 +26,15 @@ export enum ParamId {
   ReverbSize,
   ReverbMix,
   Volume,
+  // LFO 2 & 3 appended AFTER Volume so every index above stays stable (old 23-float
+  // snapshots still line up; the worklet/migration just default these). LFO 1 is the
+  // original LfoTarget/LfoRate/LfoDepth (13–15).
+  Lfo2Target,
+  Lfo2Rate,
+  Lfo2Depth,
+  Lfo3Target,
+  Lfo3Rate,
+  Lfo3Depth,
   NumParams,
 }
 
@@ -61,6 +70,12 @@ export function getParamGroup(id: ParamId): ParamGroup {
     case ParamId.LfoTarget:
     case ParamId.LfoRate:
     case ParamId.LfoDepth:
+    case ParamId.Lfo2Target:
+    case ParamId.Lfo2Rate:
+    case ParamId.Lfo2Depth:
+    case ParamId.Lfo3Target:
+    case ParamId.Lfo3Rate:
+    case ParamId.Lfo3Depth:
       return ParamGroup.Lfo;
     case ParamId.Drive:
     case ParamId.EchoTime:

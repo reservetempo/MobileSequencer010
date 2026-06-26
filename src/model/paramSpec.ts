@@ -6,6 +6,10 @@
 import { DrumType } from "./drums";
 import { ParamId, NUM_PARAMS } from "./params";
 
+// LFO destinations, shared by all three LFO sections. Index = the stored value;
+// keep in sync with the LFO routing in public/worklet/engine.js.
+export const LFO_TARGETS = ["Pitch", "Filter", "Amp", "Drive", "Reso", "Wave"];
+
 export interface ParamSpec {
   name: string;
   min: number;
@@ -26,7 +30,7 @@ function make(
   return { name, min, max, def, skew, step, unit, randomizable, choices };
 }
 
-function baseSpec(id: ParamId): ParamSpec {
+export function baseSpec(id: ParamId): ParamSpec {
   switch (id) {
     case ParamId.Pitch:          return make("Pitch", 30, 2000, 200, 0.3, 1, "Hz");
     case ParamId.PitchEnvAmount: return make("Pitch Env", 0, 5, 0, 0.5, 0.05, "x");
@@ -41,9 +45,9 @@ function baseSpec(id: ParamId): ParamSpec {
     case ParamId.FilterType:     return make("Filter", 0, 2, 0, 1, 1, "", true, ["LP", "HP", "BP"]);
     case ParamId.FilterCutoff:   return make("Cutoff", 80, 18000, 12000, 0.3, 10, "Hz");
     case ParamId.FilterReso:     return make("Reso", 0.5, 8, 0.7, 0.5, 0.05, "Q");
-    case ParamId.LfoTarget:      return make("LFO Dest", 0, 2, 0, 1, 1, "", true, ["Pitch", "Filter", "Amp"]);
-    case ParamId.LfoRate:        return make("LFO Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
-    case ParamId.LfoDepth:       return make("LFO Amt", 0, 1, 0, 1, 0.02, "");
+    case ParamId.LfoTarget:      return make("Dest", 0, 5, 0, 1, 1, "", true, LFO_TARGETS);
+    case ParamId.LfoRate:        return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
+    case ParamId.LfoDepth:       return make("Amt", 0, 1, 0, 1, 0.02, "");
     case ParamId.Drive:          return make("Drive", 0, 1, 0.1, 1, 0.02, "");
     case ParamId.EchoTime:       return make("Echo Time", 0.02, 0.6, 0.18, 0.5, 0.005, "s");
     case ParamId.EchoFeedback:   return make("Echo FB", 0, 0.85, 0.2, 1, 0.02, "");
@@ -51,6 +55,13 @@ function baseSpec(id: ParamId): ParamSpec {
     case ParamId.ReverbSize:     return make("Verb Size", 0, 1, 0.3, 1, 0.02, "");
     case ParamId.ReverbMix:      return make("Verb Mix", 0, 1, 0, 1, 0.02, "");
     case ParamId.Volume:         return make("Volume", 0, 1, 0.85, 1, 0.02, "", false);
+    // LFO 2 & 3 mirror LFO 1's specs (a destination + rate + depth each).
+    case ParamId.Lfo2Target:     return make("Dest", 0, 5, 1, 1, 1, "", true, LFO_TARGETS);
+    case ParamId.Lfo2Rate:       return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
+    case ParamId.Lfo2Depth:      return make("Amt", 0, 1, 0, 1, 0.02, "");
+    case ParamId.Lfo3Target:     return make("Dest", 0, 5, 2, 1, 1, "", true, LFO_TARGETS);
+    case ParamId.Lfo3Rate:       return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
+    case ParamId.Lfo3Depth:      return make("Amt", 0, 1, 0, 1, 0.02, "");
     default:                     return make("?", 0, 1, 0, 1, 0.01, "");
   }
 }
@@ -196,7 +207,15 @@ export function getParamSpec(drum: DrumType, id: ParamId): ParamSpec {
   return s;
 }
 
-/** Build the default 23-float snapshot for a drum (the array the worklet expects). */
+/** The absolute (widest) range for a parameter, independent of any drum/preset.
+    Manual numeric entry is clamped to this, so a value can exceed the active
+    preset's range but never break the engine. Also defines the "Full Range" preset. */
+export function baseRange(id: ParamId): { min: number; max: number } {
+  const s = baseSpec(id);
+  return { min: s.min, max: s.max };
+}
+
+/** Build the default snapshot for a drum (the array the worklet expects). */
 export function defaultSnapshot(drum: DrumType): number[] {
   const snap: number[] = new Array(NUM_PARAMS);
   for (let i = 0; i < NUM_PARAMS; i++) snap[i] = getParamSpec(drum, i as ParamId).def;

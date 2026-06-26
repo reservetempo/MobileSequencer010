@@ -1,10 +1,11 @@
 // App shell: owns the engine + pattern + UI state, and switches between the two
-// full-screen views (Grid / Sound). Within Grid you pick a workspace from a
-// dropdown: one of the six 8x7 note grids, or the "Order" list (20 slots) that
-// sequences which grids play and in what order.
+// full-screen views (Steps / Sound). Within Steps you pick a workspace from the
+// numbered pattern buttons: one of the six 16-step patterns (drawn as two stacked
+// 8-wide grids), or the "Loop" view (20-slot order list) that sequences which
+// patterns play and in what order. Painted lanes are added from saved sounds.
 
 import { EngineHost, Playhead } from "../audio/engineHost";
-import { DRUMS, DrumType } from "../model/drums";
+import { DRUMS, DrumType, drumColour, drumName } from "../model/drums";
 import { getParamSpec } from "../model/paramSpec";
 import { ParamId } from "../model/params";
 import { DrumKit } from "../model/drumKit";
@@ -16,6 +17,14 @@ import {
 import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
 import { GridView } from "./gridView";
 import { SoundView } from "./soundView";
+
+// A paint lane added from the saved-sound library: bound to a built-in drum
+// (so the engine knows which channel to trigger) plus the saved snapshot/name.
+interface Lane {
+  drum: DrumType;
+  name: string;
+  snapshot: number[];
+}
 
 const PROJECT_KEY = "msq010.project";
 const ORDER_VIEW = NUM_BLOCKS; // workspace value for the order list
@@ -31,11 +40,17 @@ export class App {
   private saveTimer = 0;
 
   private view: View = "grid";
-  private selectedDrum: DrumType = DrumType.Kick;
-  private workspace = 0; // 0..5 = grid index, ORDER_VIEW = order list
-  private orderBrush = 0; // which grid (colour) the order grid places
+  private selectedDrum: DrumType = DrumType.Kick; // voice edited in the Sounds view
+  private soundName = "Sound01"; // name of the current sound being designed
+  private workspace = 0; // 0..5 = pattern index, ORDER_VIEW = loop/order list
+  private orderBrush = 0; // which pattern (colour) the order grid places
   private playing = false;
   private tempo = 120;
+
+  // Paint lanes shown under the Steps grid. Empty by default; the + button adds
+  // saved sounds. activeLane indexes into this list (-1 = nothing to paint).
+  private lanes: Lane[] = [];
+  private activeLane = -1;
 
   private root: HTMLElement;
   private viewRoot!: HTMLElement;
@@ -65,14 +80,21 @@ export class App {
   // --- engine sync ------------------------------------------------------
   private pushAll(): void {
     for (const d of DRUMS) this.engine.setParams(d.type, this.kit.get(d.type).capture());
+    this.pushPitchRanges();
+    this.syncPattern();
+    this.engine.setTempo(this.tempo);
+  }
+
+  /** Send every drum's Pitch range for the melody mapping. Active slots use their
+      live (preset) range; the rest fall back to the static per-drum spec. */
+  private pushPitchRanges(): void {
     const ranges: (number[] | null)[] = [];
     for (let i = 0; i < 12; i++) {
       const sp = getParamSpec(i as DrumType, ParamId.Pitch);
       ranges[i] = [sp.min, sp.max];
     }
+    for (const d of this.drumTypes) ranges[d] = this.kit.pitchRange(d);
     this.engine.setPitchRanges(ranges);
-    this.syncPattern();
-    this.engine.setTempo(this.tempo);
   }
 
   /** Resend grids + order. While playing the engine stages this and applies it
@@ -95,7 +117,7 @@ export class App {
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       try {
-        const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes);
+        const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes, this.lanes, this.soundName);
         localStorage.setItem(PROJECT_KEY, JSON.stringify(json));
       } catch {
         /* ignore quota errors */
@@ -107,14 +129,17 @@ export class App {
     try {
       const raw = localStorage.getItem(PROJECT_KEY);
       if (!raw) return;
-      this.tempo = deserialize(JSON.parse(raw) as ProjectJSON, this.arr, this.kit, this.drumTypes);
+      const json = JSON.parse(raw) as ProjectJSON;
+      this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanes);
+      this.soundName = json.soundName ?? this.soundName;
+      this.activeLane = this.lanes.length ? 0 : -1;
     } catch {
       /* ignore corrupt storage */
     }
   }
 
   private saveToFile(): void {
-    const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes);
+    const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes, this.lanes, this.soundName);
     const blob = new Blob([JSON.stringify(json, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -129,7 +154,9 @@ export class App {
     reader.onload = () => {
       try {
         const json = JSON.parse(String(reader.result)) as ProjectJSON;
-        this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes);
+        this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanes);
+        this.soundName = json.soundName ?? "Sound01";
+        this.activeLane = this.lanes.length ? 0 : -1;
         this.afterProjectChange();
       } catch {
         alert("Could not load that file.");
@@ -142,6 +169,9 @@ export class App {
     this.arr = new WipArrangement();
     this.kit = new DrumKit(this.drumTypes);
     this.tempo = 120;
+    this.soundName = "Sound01";
+    this.lanes = [];
+    this.activeLane = -1;
     this.afterProjectChange();
   }
 
@@ -203,7 +233,7 @@ export class App {
     seg.className = "seg";
     for (const v of ["grid", "sound"] as View[]) {
       const b = document.createElement("button");
-      b.textContent = v === "grid" ? "Grid" : "Sound";
+      b.textContent = v === "grid" ? "Steps" : "Sounds";
       b.className = "seg-btn" + (this.view === v ? " on" : "");
       b.onclick = () => {
         if (this.view === v) return;
@@ -291,28 +321,23 @@ export class App {
     return t;
   }
 
-  // --- grid view --------------------------------------------------------
+  // --- steps view -------------------------------------------------------
   private renderGrid(): void {
     const v = this.viewRoot;
-    v.append(this.workspaceBar());
+    v.append(this.patternBar());
 
     if (this.workspace === ORDER_VIEW) {
       v.append(this.renderOrderEditor());
     } else {
-      v.append(this.gridControls());
-
       const gridWrap = document.createElement("div");
       gridWrap.className = "grid-wrap";
       this.gridView.setBlock(this.arr.blocks[this.workspace]);
-      this.gridView.setActiveDrum(this.selectedDrum);
+      this.gridView.setActiveDrum(this.activeDrumForPaint());
       gridWrap.append(this.gridView.canvas);
       v.append(gridWrap);
 
-      v.append(this.drumSelector((d) => {
-        this.selectedDrum = d;
-        this.gridView.setActiveDrum(d);
-        this.audition(d);
-      }));
+      v.append(this.scaleControls());
+      v.append(this.laneSelector());
 
       requestAnimationFrame(() => this.gridView.layout());
     }
@@ -320,50 +345,35 @@ export class App {
     this.updateLoopTime();
   }
 
-  private workspaceBar(): HTMLElement {
+  /** Numbered pattern buttons (replacing the old dropdown) + the Loop view button. */
+  private patternBar(): HTMLElement {
     const bar = document.createElement("div");
-    bar.className = "workspace-bar";
+    bar.className = "pattern-bar";
 
-    const chip = document.createElement("span");
-    chip.className = "ws-chip";
-    if (this.workspace < NUM_BLOCKS) chip.style.background = GRID_COLORS[this.workspace];
-    else chip.style.visibility = "hidden";
-
-    const sel = document.createElement("select");
-    sel.className = "workspace-select";
     for (let i = 0; i < NUM_BLOCKS; i++) {
-      const o = document.createElement("option");
-      o.value = String(i);
-      o.textContent = `Grid ${i + 1}`;
-      sel.append(o);
+      const b = document.createElement("button");
+      b.className = "pat-btn" + (this.workspace === i ? " on" : "");
+      b.textContent = String(i + 1);
+      b.style.setProperty("--pat", GRID_COLORS[i]);
+      b.onclick = () => { this.workspace = i; this.render(); };
+      bar.append(b);
     }
-    const orderOpt = document.createElement("option");
-    orderOpt.value = String(ORDER_VIEW);
-    orderOpt.textContent = "Order";
-    sel.append(orderOpt);
-    sel.value = String(this.workspace);
-    sel.onchange = () => {
-      this.workspace = Number(sel.value);
-      this.render();
-    };
 
-    const loop = document.createElement("div");
-    loop.className = "loop-time";
-    const loopLabel = document.createElement("span");
-    loopLabel.className = "loop-time-label";
-    loopLabel.textContent = "Loop";
-    this.loopTimeEl = document.createElement("span");
-    this.loopTimeEl.className = "loop-time-val";
-    loop.append(loopLabel, this.loopTimeEl);
+    const loop = document.createElement("button");
+    loop.className = "loop-view-btn" + (this.workspace === ORDER_VIEW ? " on" : "");
+    loop.textContent = "↻";
+    loop.title = "Loop / order view";
+    loop.onclick = () => { this.workspace = ORDER_VIEW; this.render(); };
+    bar.append(loop);
 
-    bar.append(chip, sel, loop);
     return bar;
   }
 
-  private gridControls(): HTMLElement {
+  /** Root + scale pickers, shown below both stacked grids. */
+  private scaleControls(): HTMLElement {
     const blk = this.arr.blocks[this.workspace];
     const row = document.createElement("div");
-    row.className = "block-ctl";
+    row.className = "scale-ctl";
 
     const rootSel = document.createElement("select");
     ALL_ROOTS.forEach((name, i) => {
@@ -393,39 +403,129 @@ export class App {
       this.syncPattern();
     };
 
-    const add = document.createElement("button");
-    add.className = "add-loop-btn";
-    add.textContent = "+ Add to loop";
-    add.onclick = () => {
-      const slot = this.arr.addToLoop(this.workspace);
-      if (slot < 0) alert("Order list is full (20 slots).");
-      this.syncPattern();
-    };
-
-    row.append(labelled("Root", rootSel), labelled("Scale", scaleSel), add);
+    row.append(labelled("Root", rootSel), labelled("Scale", scaleSel));
     return row;
   }
 
-  private drumSelector(onSelect: (drum: DrumType) => void): HTMLElement {
+  // --- paint lanes ------------------------------------------------------
+  /** Drum index the grid paints, or -1 when no lane is selected. */
+  private activeDrumForPaint(): number {
+    const lane = this.lanes[this.activeLane];
+    return lane ? lane.drum : -1;
+  }
+
+  /** Added sound lanes (none by default) plus a + button to add from the library. */
+  private laneSelector(): HTMLElement {
     const row = document.createElement("div");
-    row.className = "selector";
-    for (const d of DRUMS) {
+    row.className = "lane-bar";
+
+    const lanes = document.createElement("div");
+    lanes.className = "lanes";
+    this.lanes.forEach((lane, i) => {
       const b = document.createElement("button");
-      b.className = "drum-pad" + (d.type === this.selectedDrum ? " on" : "");
+      b.className = "drum-pad" + (i === this.activeLane ? " on" : "");
       const sw = document.createElement("span");
       sw.className = "swatch";
-      sw.style.background = d.colour;
+      sw.style.background = drumColour(lane.drum);
       const name = document.createElement("span");
-      name.textContent = d.name;
+      name.textContent = lane.name;
       b.append(sw, name);
-      b.onclick = () => {
-        row.querySelectorAll(".drum-pad").forEach((el) => el.classList.remove("on"));
-        b.classList.add("on");
-        onSelect(d.type);
-      };
-      row.append(b);
-    }
+      b.onclick = () => this.selectLane(i);
+      // The selected lane gets an × to remove it.
+      if (i === this.activeLane) {
+        const rm = document.createElement("span");
+        rm.className = "lane-remove";
+        rm.textContent = "×";
+        rm.title = "Remove lane";
+        rm.onclick = (e) => { e.stopPropagation(); this.removeLane(i); };
+        b.append(rm);
+      }
+      lanes.append(b);
+    });
+
+    const add = document.createElement("button");
+    add.className = "add-sound-btn";
+    add.textContent = "+";
+    add.title = "Add a saved sound";
+    add.onclick = (e) => { e.stopPropagation(); this.openSoundPicker(row); };
+
+    row.append(lanes, add);
     return row;
+  }
+
+  private selectLane(i: number): void {
+    this.activeLane = i;
+    const lane = this.lanes[i];
+    if (!lane) return;
+    // Make the lane's saved sound the live voice for its drum, then preview it.
+    this.kit.get(lane.drum).restore(lane.snapshot);
+    this.engine.setParams(lane.drum, this.kit.get(lane.drum).capture());
+    this.gridView.setActiveDrum(lane.drum);
+    this.audition(lane.drum);
+    this.persist();
+    this.render();
+  }
+
+  private removeLane(i: number): void {
+    this.lanes.splice(i, 1);
+    if (this.activeLane === i) this.activeLane = -1; // nothing selected to paint
+    else if (this.activeLane > i) this.activeLane -= 1;
+    this.gridView.setActiveDrum(this.activeDrumForPaint());
+    this.persist();
+    this.render();
+  }
+
+  /** Popup of every saved sound across drums; choosing one adds it as a lane. */
+  private openSoundPicker(anchor: HTMLElement): void {
+    const existing = anchor.querySelector(".sound-picker");
+    if (existing) { existing.remove(); return; }
+
+    const panel = document.createElement("div");
+    panel.className = "sound-picker";
+
+    const items: { drum: DrumType; name: string; snapshot: number[] }[] = [];
+    for (const d of DRUMS) {
+      for (const s of this.library.list(d.type)) {
+        items.push({ drum: d.type, name: s.name, snapshot: s.snapshot });
+      }
+    }
+
+    if (items.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = "No saved sounds yet. Save some in the Sound view.";
+      panel.append(empty);
+    } else {
+      for (const it of items) {
+        const b = document.createElement("button");
+        const sw = document.createElement("span");
+        sw.className = "swatch";
+        sw.style.background = drumColour(it.drum);
+        const name = document.createElement("span");
+        name.textContent = `${it.name} · ${drumName(it.drum)}`;
+        b.append(sw, name);
+        b.onclick = () => {
+          panel.remove();
+          this.addLane(it.drum, it.name, it.snapshot);
+        };
+        panel.append(b);
+      }
+    }
+
+    anchor.append(panel);
+    // Dismiss on the next outside tap.
+    const close = (ev: PointerEvent) => {
+      if (!panel.contains(ev.target as Node)) {
+        panel.remove();
+        document.removeEventListener("pointerdown", close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+  }
+
+  private addLane(drum: DrumType, name: string, snapshot: number[]): void {
+    this.lanes.push({ drum, name, snapshot: snapshot.slice() });
+    this.selectLane(this.lanes.length - 1);
   }
 
   // --- order editor -----------------------------------------------------
@@ -433,9 +533,19 @@ export class App {
     const wrap = document.createElement("div");
     wrap.className = "order-editor";
 
+    const loop = document.createElement("div");
+    loop.className = "loop-time";
+    const loopLabel = document.createElement("span");
+    loopLabel.className = "loop-time-label";
+    loopLabel.textContent = "Loop length";
+    this.loopTimeEl = document.createElement("span");
+    this.loopTimeEl.className = "loop-time-val";
+    loop.append(loopLabel, this.loopTimeEl);
+    wrap.append(loop);
+
     const hint = document.createElement("p");
     hint.className = "hint";
-    hint.textContent = "Pick a grid colour, then tap slots to place it. Plays top-left to bottom-right.";
+    hint.textContent = "Pick a pattern colour, then tap slots to place it. Plays top-left to bottom-right.";
     wrap.append(hint);
 
     wrap.append(this.gridPalette());
@@ -461,7 +571,7 @@ export class App {
     return wrap;
   }
 
-  /** Colour swatches for the six grids; the selected one is the placing brush. */
+  /** Colour swatches for the six patterns; the selected one is the placing brush. */
   private gridPalette(): HTMLElement {
     const row = document.createElement("div");
     row.className = "grid-palette";
@@ -497,19 +607,19 @@ export class App {
   private renderSound(): void {
     const v = this.viewRoot;
 
-    const sound = new SoundView(this.kit, this.library, this.selectedDrum, {
+    const sound = new SoundView(this.kit, this.library, this.selectedDrum, this.soundName, {
       onChange: (d) => {
         this.engine.setParams(d, this.kit.get(d).capture());
         this.persist();
       },
+      onRangeChange: () => {
+        this.pushPitchRanges();
+        this.persist();
+      },
       onAudition: (d) => this.audition(d),
+      onRename: (name) => { this.soundName = name; this.persist(); },
     });
 
-    v.append(this.drumSelector((d) => {
-      this.selectedDrum = d;
-      sound.setDrum(d);
-      this.audition(d);
-    }));
     v.append(sound.el);
   }
 }

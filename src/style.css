@@ -101,18 +101,35 @@ button:active { transform: scale(0.97); }
 /* --- grid view --- */
 .viewroot { flex: 1; display: flex; flex-direction: column; padding: 12px; gap: 12px; }
 
-/* workspace picker + loop time */
-.workspace-bar { display: flex; align-items: center; gap: 10px; }
-.ws-chip { width: 16px; height: 16px; border-radius: 5px; flex: none; }
-.workspace-select {
-  font: inherit; color: var(--text); background: var(--panel);
-  border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font-weight: 600;
+/* pattern picker: numbered buttons (1..6) + loop/order view button */
+.pattern-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pat-btn {
+  width: 40px; height: 40px; padding: 0; flex: none;
+  font-weight: 700; font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 10px; position: relative;
 }
-.loop-time { margin-left: auto; display: flex; align-items: baseline; gap: 6px; font-size: 13px; }
-.loop-time-label { color: var(--muted); }
-.loop-time-val { color: var(--accent); font-variant-numeric: tabular-nums; }
+.pat-btn::before {
+  content: ""; position: absolute; top: 5px; left: 5px; right: 5px; height: 3px;
+  border-radius: 2px; background: var(--pat);
+}
+.pat-btn.on { border-color: var(--pat); color: var(--text); background: var(--panel2); }
+.loop-view-btn {
+  margin-left: auto;
+  width: 40px; height: 40px; padding: 0; flex: none;
+  font-size: 18px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 10px;
+}
+.loop-view-btn.on { border-color: var(--accent); color: var(--accent); }
 
-.block-ctl { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+/* loop time (shown in the loop/order view) */
+.loop-time { display: flex; align-items: baseline; gap: 6px; font-size: 14px; }
+.loop-time-label { color: var(--muted); }
+.loop-time-val { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* scale options, shown below both grids */
+.scale-ctl { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .field select {
   font: inherit;
@@ -122,7 +139,37 @@ button:active { transform: scale(0.97); }
   border-radius: 8px;
   padding: 8px 10px;
 }
-.add-loop-btn { margin-left: auto; border-color: var(--accent); color: var(--accent); }
+
+/* paint lanes (added from saved sounds) + the add (+) button */
+.lane-bar { display: flex; align-items: stretch; gap: 8px; margin-top: auto; position: relative; }
+.lanes { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
+.lanes:empty { min-height: 0; }
+.lanes .drum-pad { position: relative; }
+.lane-remove {
+  position: absolute; top: -7px; right: -7px;
+  width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel2); border: 1px solid var(--line);
+  color: var(--text); font-size: 14px; line-height: 1;
+}
+.lane-remove:active { transform: scale(0.9); }
+.add-sound-btn {
+  width: 48px; flex: none; font-size: 22px; line-height: 1;
+  border-style: dashed; color: var(--muted);
+}
+.sound-picker {
+  position: absolute; right: 0; bottom: 56px; z-index: 20;
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 6px; min-width: 200px; max-width: 280px;
+  max-height: 50vh; overflow-y: auto;
+}
+.sound-picker button {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  background: transparent; border: none; padding: 9px 10px;
+}
+.sound-picker button:active { background: var(--panel); }
+.sound-picker .hint { padding: 8px 10px; }
 
 /* order editor */
 .order-editor { display: flex; flex-direction: column; gap: 12px; }
@@ -158,8 +205,36 @@ button:active { transform: scale(0.97); }
 .soundview { display: flex; flex-direction: column; gap: 14px; }
 .sound-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .sound-title { margin: 0; font-size: 18px; font-weight: 600; }
-.sound-lib { display: flex; align-items: center; gap: 8px; }
+.sound-title-input {
+  min-width: 0; flex: 1; font: inherit; font-size: 18px; font-weight: 600;
+  color: var(--text); background: transparent;
+  border: 1px solid transparent; border-radius: 8px; padding: 4px 6px;
+}
+.sound-title-input:focus { border-color: var(--line); background: var(--panel); outline: none; }
+.sound-lib { position: relative; display: flex; align-items: center; gap: 8px; }
 .sound-lib select { max-width: 130px; }
+.preset-current {
+  font-size: 12px; color: var(--muted);
+  max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* preset grid overlay */
+.preset-grid {
+  position: absolute; right: 0; top: 42px; z-index: 20;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+  background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px; min-width: 240px; max-width: 320px;
+  max-height: 60vh; overflow-y: auto;
+}
+.preset-tile {
+  padding: 10px 6px; font-size: 12px; text-align: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+}
+.preset-tile:active { background: var(--panel2); }
+.preset-grid-sep {
+  grid-column: 1 / -1; font-size: 11px; color: var(--muted);
+  padding: 6px 2px 0; border-top: 1px solid var(--line); margin-top: 2px;
+}
 
 .cat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
 .cat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -176,10 +251,23 @@ button:active { transform: scale(0.97); }
 .vbox-name { font-size: 12px; color: var(--muted); }
 .vbox-val { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
 .vbox input[type="range"] { width: 100%; }
+.vbox-ctl { display: flex; align-items: center; gap: 6px; }
+.vbox-ctl input[type="range"] { flex: 1; min-width: 0; }
+.vbox-num {
+  width: 58px; flex: none; font: inherit; font-size: 12px; text-align: right;
+  color: var(--text); background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 5px;
+}
 .vbox-select {
   font: inherit; color: var(--text); background: var(--panel2);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px;
 }
+
+/* global shuffle bar + split LFO sections */
+.global-ctl .cat-name { font-size: 14px; }
+.lfo-sections { display: flex; flex-direction: column; gap: 10px; }
+.lfo-block { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.lfo-head { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
 
 @media (min-width: 560px) {
   .cat-params { grid-template-columns: repeat(3, 1fr); }
