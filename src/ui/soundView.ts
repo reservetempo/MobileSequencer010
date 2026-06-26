@@ -13,6 +13,7 @@ import {
 } from "../model/params";
 import { getParamSpec, formatValue, isDiscrete } from "../model/paramSpec";
 import { FACTORY_PRESETS, Preset } from "../model/presets";
+import { burstConfetti } from "./confetti";
 
 const ALL_GROUPS = [
   ParamGroup.Tone, ParamGroup.Amp, ParamGroup.Filter, ParamGroup.Lfo, ParamGroup.Fx,
@@ -29,13 +30,15 @@ export interface SoundViewCallbacks {
 
 // Swatches offered when saving a sound (its identity colour on the grid).
 const SAVE_PALETTE = [
-  "#ff3b30", "#ff9f0a", "#ffd60a", "#34c759", "#00ffc8", "#64d2ff",
-  "#0a84ff", "#6c5cff", "#bf5af2", "#ff6482", "#ff7ab8", "#a2845e",
+  "#ff3b30", "#ff5e3a", "#ff9500", "#ff9f0a", "#ffcc00", "#ffd60a",
+  "#34c759", "#30d158", "#00c7be", "#00ffc8", "#40c8e0", "#64d2ff",
+  "#0a84ff", "#5e5ce6", "#6c5cff", "#7d4dff", "#bf5af2", "#da70d6",
+  "#ff2d55", "#ff6482", "#ff7ab8", "#a2845e", "#b0b3b8", "#ffffff",
 ];
 
 export class SoundView {
   readonly el = document.createElement("div");
-  private randomness = 0.3; // single global shuffle amount (fraction toward edges)
+  private randomness = 1.0; // single global shuffle amount (1 = uniform over range)
 
   constructor(
     private kit: DrumKit,
@@ -71,17 +74,9 @@ export class SoundView {
 
     const header = document.createElement("div");
     header.className = "sound-header";
-    const title = document.createElement("input");
-    title.className = "sound-title-input";
-    title.value = this.soundName;
-    title.placeholder = "Sound name";
-    title.setAttribute("aria-label", "Sound name");
-    title.onchange = () => {
-      const v = title.value.trim() || "Sound01";
-      title.value = v;
-      this.soundName = v;
-      this.cb.onRename(v);
-    };
+    const title = document.createElement("h2");
+    title.className = "sound-title";
+    title.textContent = this.params().presetName();
     header.append(title, this.presetRow());
     this.el.append(header);
 
@@ -90,7 +85,7 @@ export class SoundView {
     for (const g of ALL_GROUPS) this.el.append(this.category(g));
   }
 
-  // Presets button (opens a grid) + Save, plus the active preset name.
+  // Presets + Saved buttons + Save.
   private presetRow(): HTMLElement {
     const row = document.createElement("div");
     row.className = "sound-lib";
@@ -101,30 +96,31 @@ export class SoundView {
     const savedBtn = mkBtn("Saved", "cat-btn");
     savedBtn.onclick = () => this.openSavedList(savedBtn);
 
-    const current = document.createElement("span");
-    current.className = "preset-current";
-    current.textContent = this.params().presetName();
-
-    // Save the current sound to the library: pick a colour, store it, then revert.
-    const save = mkBtn("Save", "cat-btn");
+    // Save the current sound: name it + pick a colour, store it, then revert.
+    const save = mkBtn("Save", "cat-btn save-btn");
     save.onclick = () => this.openSaveColors(save);
 
-    row.append(current, presetBtn, savedBtn, save);
+    row.append(presetBtn, savedBtn, save);
     return row;
   }
 
-  // Colour picker shown on Save; choosing a swatch stores the sound and reverts.
+  // Name + colour picker shown on Save; choosing a swatch stores the sound.
   private openSaveColors(anchor: HTMLElement): void {
     const existing = this.el.querySelector(".save-colors");
     if (existing) { existing.remove(); return; }
 
-    const name = this.soundName.trim() || "Sound01";
     const panel = document.createElement("div");
     panel.className = "save-colors";
     const label = document.createElement("div");
     label.className = "save-colors-label";
-    label.textContent = `Save "${name}" as:`;
+    label.textContent = "Name your sound, then pick a colour:";
     panel.append(label);
+
+    const nameInput = document.createElement("input");
+    nameInput.className = "save-name-input";
+    nameInput.placeholder = "Sound name";
+    nameInput.value = this.soundName; // prefilled when a saved sound was loaded
+    panel.append(nameInput);
 
     const grid = document.createElement("div");
     grid.className = "save-colors-grid";
@@ -133,15 +129,18 @@ export class SoundView {
       sw.className = "save-swatch";
       sw.style.background = color;
       sw.onclick = () => {
+        const name = nameInput.value.trim() || `Sound ${this.library.list(this.drum).length + 1}`;
         panel.remove();
         this.library.add(this.drum, name, this.params().capture(), color, this.kit.pitchRange(this.drum));
-        this.cb.onSaved(); // app reverts editor to Full Range + Sound01 and re-renders
+        burstConfetti();
+        this.cb.onSaved(); // app reverts editor to a fresh random Full Range sound
       };
       grid.append(sw);
     }
     panel.append(grid);
 
     anchor.parentElement?.append(panel);
+    setTimeout(() => nameInput.focus(), 0);
     const close = (ev: PointerEvent) => {
       if (!panel.contains(ev.target as Node) && ev.target !== anchor) {
         panel.remove();
@@ -271,7 +270,7 @@ export class SoundView {
     name.textContent = "Shuffle";
     head.append(name);
 
-    const shuffle = mkBtn("Shuffle", "cat-btn");
+    const shuffle = mkBtn("🎲 Shuffle", "cat-btn shuffle-btn");
     const back = mkBtn("Back", "cat-btn");
     const reset = mkBtn("Reset", "cat-btn");
     back.disabled = !this.kit.canBack(drum);

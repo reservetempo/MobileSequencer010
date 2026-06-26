@@ -45,7 +45,7 @@ export class App {
 
   private view: View = "grid";
   private selectedDrum: DrumType = DrumType.Kick; // voice edited in the Sounds view
-  private soundName = "Sound01"; // name of the current sound being designed
+  private soundName = ""; // last used sound name (prefills the Save dialog)
   private workspace = 0; // 0..5 = pattern index, ORDER_VIEW = loop/order list
   private orderBrush = 0; // which pattern (colour) the order grid places
   private playing = false;
@@ -168,7 +168,7 @@ export class App {
       try {
         const json = JSON.parse(String(reader.result)) as ProjectJSON;
         this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanes);
-        this.soundName = json.soundName ?? "Sound01";
+        this.soundName = json.soundName ?? "";
         this.activeLane = this.lanes.length ? 0 : -1;
         this.afterProjectChange();
       } catch {
@@ -181,9 +181,8 @@ export class App {
   private newProject(): void {
     this.arr = new WipArrangement();
     this.kit = new DrumKit(this.drumTypes);
-    this.kit.applyPreset(this.selectedDrum, FULL_RANGE_PRESET); // default editor sound
+    this.applyRandomDefault(); // default editor sound: random Full Range
     this.tempo = 120;
-    this.soundName = "Sound01";
     this.lanes = [];
     this.activeLane = -1;
     this.afterProjectChange();
@@ -209,10 +208,17 @@ export class App {
     this.engine.trigger(lane.drum, lane.snapshot, gate);
   }
 
-  /** After saving a sound: reset the editor to the default Full Range / Sound01. */
-  private revertEditorToDefault(): void {
+  /** The editor's default sound: Full Range, fully shuffled so it's random and
+      different every time, with no carried-over name. */
+  private applyRandomDefault(): void {
     this.kit.applyPreset(this.selectedDrum, FULL_RANGE_PRESET);
-    this.soundName = "Sound01";
+    this.kit.shuffleAll(this.selectedDrum, 1.0); // 100% -> uniform over the full range
+    this.soundName = "";
+  }
+
+  /** After saving a sound: drop back to a fresh random Full Range sound. */
+  private revertEditorToDefault(): void {
+    this.applyRandomDefault();
     this.engine.setParams(this.selectedDrum, this.kit.get(this.selectedDrum).capture());
     this.pushPitchRanges();
     this.audition(this.selectedDrum);
@@ -232,8 +238,8 @@ export class App {
     btn.textContent = "▶ Start";
     btn.onclick = async () => {
       await this.engine.start();
-      // Fresh session (no saved project): default the editor sound to Full Range.
-      if (!this.loadFromStorage()) this.kit.applyPreset(this.selectedDrum, FULL_RANGE_PRESET);
+      // Fresh session (no saved project): start on a random Full Range sound.
+      if (!this.loadFromStorage()) this.applyRandomDefault();
       this.pushAll();
       this.render();
     };
