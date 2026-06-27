@@ -92,6 +92,12 @@ export class DrumParameters {
       const r = baseRange(id);
       if (lo[i] !== undefined) this.lo[id] = Math.min(r.max, Math.max(r.min, lo[i]));
       if (hi[i] !== undefined) this.hi[id] = Math.min(r.max, Math.max(r.min, hi[i]));
+      // LFO destinations are always fully shufflable; widen any range saved before
+      // the "None" option existed so it can be reached again.
+      if (id === ParamId.LfoTarget || id === ParamId.Lfo2Target || id === ParamId.Lfo3Target) {
+        this.lo[id] = r.min;
+        this.hi[id] = r.max;
+      }
     }
   }
 
@@ -101,8 +107,12 @@ export class DrumParameters {
       params (Wave/Filter/LFO destinations) reroll to a random choice within their
       preset range — locked when lo==hi, so a character preset only shuffles its LFO
       destinations while Full Range also shuffles waves/filters. The shuffle amount
-      is the probability that each discrete param rerolls. */
-  randomize(randomness: number): void {
+      is the probability that each discrete param rerolls.
+
+      `precision` coarsens the result: when > 0, each continuous value snaps to a
+      multiple of (its spec step x precision) — so 1 = whole steps, 2 = evens,
+      5 = fives, 10 = tens, etc. 0 leaves the raw (finest) value. */
+  randomize(randomness: number, precision = 0): void {
     randomness = Math.min(1, Math.max(0, randomness));
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
@@ -119,7 +129,12 @@ export class DrumParameters {
       const cur = this.get(id);
       const lo = cur + (this.lo[id] - cur) * randomness;
       const hi = cur + (this.hi[id] - cur) * randomness;
-      this.set(id, lo + Math.random() * (hi - lo));
+      let v = lo + Math.random() * (hi - lo);
+      if (precision > 0 && s.step > 0) {
+        const q = s.step * precision;
+        v = Math.min(this.hi[id], Math.max(this.lo[id], Math.round(v / q) * q));
+      }
+      this.set(id, v);
     }
   }
 }
@@ -157,9 +172,9 @@ export class DrumKit {
     this.undo.set(drum, stack);
   }
 
-  shuffleAll(drum: DrumType, randomness: number): void {
+  shuffleAll(drum: DrumType, randomness: number, precision = 0): void {
     this.pushUndo(drum);
-    this.get(drum).randomize(randomness);
+    this.get(drum).randomize(randomness, precision);
   }
 
   resetAll(drum: DrumType): void {

@@ -26,7 +26,8 @@ const P = {
 };
 
 // LFO destination indices, in sync with LFO_TARGETS in src/model/paramSpec.ts.
-const LFO_PITCH = 0, LFO_FILTER = 1, LFO_AMP = 2, LFO_DRIVE = 3, LFO_RESO = 4, LFO_WAVE = 5;
+// LFO_NONE disables the LFO (handled by falling through the routing switch).
+const LFO_PITCH = 0, LFO_FILTER = 1, LFO_AMP = 2, LFO_DRIVE = 3, LFO_RESO = 4, LFO_WAVE = 5, LFO_NONE = 6;
 
 const NUM_DRUMS = 12;
 const NUM_VOICES = 6;
@@ -210,6 +211,7 @@ class Voice {
           case LFO_DRIVE:  driveAdd  += v * depth;                     break;
           case LFO_RESO:   resoMul   *= Math.pow(2, v * depth);        break;
           case LFO_WAVE:   pwOff     += v * depth * 0.45;              break;
+          case LFO_NONE:   default:                                   break; // disabled
         }
       }
 

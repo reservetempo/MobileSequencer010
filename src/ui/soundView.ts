@@ -20,6 +20,18 @@ const ALL_GROUPS = [
   ParamGroup.Output,
 ];
 
+// Shuffle precision: snaps continuous results to a multiple of (param step x mult).
+// "Any" (0) keeps full precision; higher = coarser, fewer options to shuffle between.
+const PRECISION_OPTIONS: { label: string; mult: number }[] = [
+  { label: "Any", mult: 0 },
+  { label: "Whole", mult: 1 },
+  { label: "Evens", mult: 2 },
+  { label: "5s", mult: 5 },
+  { label: "10s", mult: 10 },
+  { label: "25s", mult: 25 },
+  { label: "50s", mult: 50 },
+];
+
 export interface SoundViewCallbacks {
   onChange: (drum: DrumType) => void;      // a value changed -> resend live params
   onRangeChange: (drum: DrumType) => void; // ranges changed -> resend pitch ranges
@@ -39,6 +51,7 @@ const SAVE_PALETTE = [
 export class SoundView {
   readonly el = document.createElement("div");
   private randomness = 1.0; // single global shuffle amount (1 = uniform over range)
+  private precisionIdx = 0; // index into PRECISION_OPTIONS (0 = Any/full precision)
 
   constructor(
     private kit: DrumKit,
@@ -274,7 +287,10 @@ export class SoundView {
     const back = mkBtn("Back", "cat-btn");
     const reset = mkBtn("Reset", "cat-btn");
     back.disabled = !this.kit.canBack(drum);
-    shuffle.onclick = () => { this.kit.shuffleAll(drum, this.randomness); this.afterReplace(); };
+    shuffle.onclick = () => {
+      this.kit.shuffleAll(drum, this.randomness, PRECISION_OPTIONS[this.precisionIdx].mult);
+      this.afterReplace();
+    };
     reset.onclick = () => { this.kit.resetAll(drum); this.afterReplace(); };
     back.onclick = () => { if (this.kit.backAll(drum)) this.afterReplace(); };
     head.append(shuffle, back, reset);
@@ -295,6 +311,25 @@ export class SoundView {
     };
     rnd.append(slider, lbl);
     head.append(rnd);
+
+    // Precision: how coarsely shuffled values snap (fewer options as you go right).
+    const prec = document.createElement("div");
+    prec.className = "precision";
+    const plbl = document.createElement("span");
+    plbl.className = "precision-lbl";
+    plbl.textContent = "Precision";
+    const psel = document.createElement("select");
+    psel.className = "vbox-select";
+    PRECISION_OPTIONS.forEach((o, i) => {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = o.label;
+      psel.append(opt);
+    });
+    psel.value = String(this.precisionIdx);
+    psel.onchange = () => { this.precisionIdx = Number(psel.value); };
+    prec.append(plbl, psel);
+    head.append(prec);
 
     sec.append(head);
     return sec;

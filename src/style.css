@@ -284,6 +284,9 @@ button:active { transform: scale(0.97); }
 .rnd { display: flex; align-items: center; gap: 6px; width: 100%; }
 .rnd input { flex: 1; }
 .rnd-lbl { color: var(--muted); font-size: 12px; width: 38px; text-align: right; }
+.precision { display: flex; align-items: center; gap: 8px; width: 100%; }
+.precision-lbl { color: var(--muted); font-size: 12px; }
+.precision select { flex: 1; }
 
 .cat-params { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
 .vbox { display: flex; flex-direction: column; gap: 5px; }

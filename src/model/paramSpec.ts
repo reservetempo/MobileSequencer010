@@ -7,8 +7,9 @@ import { DrumType } from "./drums";
 import { ParamId, NUM_PARAMS } from "./params";
 
 // LFO destinations, shared by all three LFO sections. Index = the stored value;
-// keep in sync with the LFO routing in public/worklet/engine.js.
-export const LFO_TARGETS = ["Pitch", "Filter", "Amp", "Drive", "Reso", "Wave"];
+// keep in sync with the LFO routing in public/worklet/engine.js. "None" (last)
+// disables the LFO, so shuffling its destination can leave 0-2 LFOs active.
+export const LFO_TARGETS = ["Pitch", "Filter", "Amp", "Drive", "Reso", "Wave", "None"];
 
 export interface ParamSpec {
   name: string;
@@ -45,7 +46,7 @@ export function baseSpec(id: ParamId): ParamSpec {
     case ParamId.FilterType:     return make("Filter", 0, 2, 0, 1, 1, "", true, ["LP", "HP", "BP"]);
     case ParamId.FilterCutoff:   return make("Cutoff", 80, 18000, 12000, 0.3, 10, "Hz");
     case ParamId.FilterReso:     return make("Reso", 0.5, 8, 0.7, 0.5, 0.05, "Q");
-    case ParamId.LfoTarget:      return make("Dest", 0, 5, 0, 1, 1, "", true, LFO_TARGETS);
+    case ParamId.LfoTarget:      return make("Dest", 0, 6, 0, 1, 1, "", true, LFO_TARGETS);
     case ParamId.LfoRate:        return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
     case ParamId.LfoDepth:       return make("Amt", 0, 1, 0, 1, 0.02, "");
     case ParamId.Drive:          return make("Drive", 0, 1, 0.1, 1, 0.02, "");
@@ -56,10 +57,10 @@ export function baseSpec(id: ParamId): ParamSpec {
     case ParamId.ReverbMix:      return make("Verb Mix", 0, 1, 0, 1, 0.02, "");
     case ParamId.Volume:         return make("Volume", 0, 1, 0.85, 1, 0.02, "", false);
     // LFO 2 & 3 mirror LFO 1's specs (a destination + rate + depth each).
-    case ParamId.Lfo2Target:     return make("Dest", 0, 5, 1, 1, 1, "", true, LFO_TARGETS);
+    case ParamId.Lfo2Target:     return make("Dest", 0, 6, 1, 1, 1, "", true, LFO_TARGETS);
     case ParamId.Lfo2Rate:       return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
     case ParamId.Lfo2Depth:      return make("Amt", 0, 1, 0, 1, 0.02, "");
-    case ParamId.Lfo3Target:     return make("Dest", 0, 5, 2, 1, 1, "", true, LFO_TARGETS);
+    case ParamId.Lfo3Target:     return make("Dest", 0, 6, 2, 1, 1, "", true, LFO_TARGETS);
     case ParamId.Lfo3Rate:       return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
     case ParamId.Lfo3Depth:      return make("Amt", 0, 1, 0, 1, 0.02, "");
     default:                     return make("?", 0, 1, 0, 1, 0.01, "");
