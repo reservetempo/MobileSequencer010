@@ -23,7 +23,8 @@ export class MelodyGrid {
   scale = 0; // 0 = Major
   // When false, the row->note mapping is bypassed: each painted cell plays its
   // saved sound as-is (no key/pitch change). Root/scale are ignored while off.
-  keyEnabled = true;
+  // Defaults off: new patterns play sounds as-is until you turn the key on.
+  keyEnabled = false;
 
   private idx(row: number, step: number): number {
     return row * NUM_STEPS + step;
