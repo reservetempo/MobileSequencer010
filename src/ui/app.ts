@@ -444,11 +444,27 @@ export class App {
     return bar;
   }
 
-  /** Root + scale pickers, shown below both stacked grids. */
+  /** Key on/off toggle + Root + Scale pickers, shown below both stacked grids.
+      When the key is off the row->note mapping is bypassed (each cell plays its
+      saved sound as-is) and the Root/Scale pickers are hidden. */
   private scaleControls(): HTMLElement {
     const blk = this.arr.blocks[this.workspace];
     const row = document.createElement("div");
     row.className = "scale-ctl";
+
+    const keyToggle = document.createElement("button");
+    keyToggle.className = "key-toggle" + (blk.keyEnabled ? " on" : "");
+    keyToggle.textContent = blk.keyEnabled ? "Key: On" : "Key: Off";
+    keyToggle.title = "Turn the key/scale mapping on or off for this pattern";
+    keyToggle.onclick = () => {
+      blk.keyEnabled = !blk.keyEnabled;
+      this.gridView.draw();
+      this.syncPattern();
+      this.render(); // show/hide the Root + Scale pickers
+    };
+    row.append(labelled("Key", keyToggle));
+
+    if (!blk.keyEnabled) return row; // no key -> hide the Root/Scale pickers
 
     const rootSel = document.createElement("select");
     ALL_ROOTS.forEach((name, i) => {

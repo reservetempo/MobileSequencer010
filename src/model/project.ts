@@ -19,7 +19,7 @@ export interface LaneJSON {
 export interface ProjectJSON {
   version: 3;
   tempo: number;
-  blocks: { cells: number[]; root: number; scale: number }[];
+  blocks: { cells: number[]; root: number; scale: number; keyEnabled?: boolean }[];
   order: number[];
   drums: Record<number, number[]>; // drum type -> param snapshot
   // drum type -> live shuffle window (v3+); absent saves fall back to factory ranges.
@@ -90,6 +90,7 @@ export function deserialize(
     }
     dst.root = ((src.root % 12) + 12) % 12;
     dst.scale = src.scale ?? 0;
+    dst.keyEnabled = src.keyEnabled !== false; // older saves had no key toggle -> on
   }
 
   for (let i = 0; i < ORDER_SLOTS; i++) {

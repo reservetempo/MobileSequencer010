@@ -376,7 +376,7 @@ class EngineProcessor extends AudioWorkletProcessor {
 
     // --- pattern + transport state ---
     // Active pattern the loop is currently playing.
-    this.blocks = null;      // [{cells:Int, root, scale} x NUM_BLOCKS]
+    this.blocks = null;      // [{cells:Int, root, scale, keyEnabled} x NUM_BLOCKS]
     this.order = null;       // [grid index | -1] x ORDER_SLOTS
     // Staged pattern: edits while playing land here and are promoted to active
     // only when the loop restarts, so the current pass plays unchanged.
@@ -481,7 +481,9 @@ class EngineProcessor extends AudioWorkletProcessor {
 
       const snap = ch.params.slice(); // base sound...
       const range = this.pitchRanges[drum];
-      if (range) snap[P.Pitch] = frequencyFor(row, g.root, g.scale, range[0], range[1]); // ...pitched
+      // ...pitched to the row's note, unless this grid has its key turned off,
+      // in which case every row plays the saved sound as-is (no pitch change).
+      if (range && g.keyEnabled !== false) snap[P.Pitch] = frequencyFor(row, g.root, g.scale, range[0], range[1]);
       ch.trigger(snap, gate);
       fired.push(drum);
     }

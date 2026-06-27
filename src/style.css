@@ -139,6 +139,15 @@ button:active { transform: scale(0.97); }
   border-radius: 8px;
   padding: 8px 10px;
 }
+.key-toggle {
+  font: inherit;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.key-toggle.on { background: var(--panel2); color: var(--text); }
 
 /* paint lanes (added from saved sounds) + the add (+) button */
 .lane-bar { display: flex; align-items: stretch; gap: 8px; margin-top: auto; position: relative; }

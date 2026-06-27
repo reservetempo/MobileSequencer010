@@ -68,7 +68,7 @@ export class EngineHost {
   /** Replace the pattern (6 grids + 20-slot order). Resend on any edit; while
       playing the engine stages it and applies at the next loop restart. */
   setPattern(
-    blocks: { cells: number[]; root: number; scale: number }[],
+    blocks: { cells: number[]; root: number; scale: number; keyEnabled: boolean }[],
     order: number[]
   ): void {
     this.node?.port.postMessage({ type: "pattern", blocks, order });

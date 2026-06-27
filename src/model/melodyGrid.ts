@@ -21,6 +21,9 @@ export class MelodyGrid {
   readonly cells: Int16Array = new Int16Array(NUM_ROWS * NUM_STEPS).fill(EMPTY);
   root = 0; // 0 = C
   scale = 0; // 0 = Major
+  // When false, the row->note mapping is bypassed: each painted cell plays its
+  // saved sound as-is (no key/pitch change). Root/scale are ignored while off.
+  keyEnabled = true;
 
   private idx(row: number, step: number): number {
     return row * NUM_STEPS + step;
@@ -52,6 +55,7 @@ export interface BlockMessage {
   cells: number[];
   root: number;
   scale: number;
+  keyEnabled: boolean;
 }
 
 export class WipArrangement {
@@ -70,6 +74,7 @@ export class WipArrangement {
       cells: Array.from(g.cells),
       root: g.root,
       scale: g.scale,
+      keyEnabled: g.keyEnabled,
     }));
   }
 
