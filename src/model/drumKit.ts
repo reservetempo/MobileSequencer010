@@ -37,6 +37,22 @@ function randNormal(): number {
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
+// --- Shuffle max-length model ----------------------------------------------
+// A rough estimate of a hit's audible length in seconds: the amp body plus the
+// dominant FX tail (echo OR reverb, whichever rings longest). Used both to cap
+// shuffled sounds and to label them. Constants are tuned by ear, not exact DSP.
+const ECHO_EPS = 0.03; // echo repeat quieter than this is inaudible
+const VERB_EPS = 0.05; // reverb mix below this adds no usable tail
+const RV_BASE = 0.3;   // shortest reverb tail (size 0), seconds
+const RV_SPAN = 2.2;   // extra tail at size 1, seconds
+
+// How many audible repeats a feedback echo produces at the given feedback/mix.
+function echoRepeats(fb: number, mix: number): number {
+  if (mix <= ECHO_EPS) return 0;
+  if (fb < 0.01) return 1;
+  return Math.max(1, 1 + Math.log(ECHO_EPS / mix) / Math.log(fb));
+}
+
 // Draw a frequency in [lo, hi] (both > 0) shaped by `curve`. Log/Gaussian options
 // work in normalised log-position p∈[0,1] and map back with lo·(hi/lo)^p.
 export function sampleFreq(curve: FreqCurve, lo: number, hi: number): number {
@@ -153,8 +169,11 @@ export class DrumParameters {
 
       `curve` reshapes the random draw of the FREQUENCY params (Pitch & Filter
       Cutoff) so highs don't dominate perceptually — see {@link FreqCurve}. All
-      other continuous params keep a uniform draw. */
-  randomize(randomness: number, curve: FreqCurve = FreqCurve.Linear): void {
+      other continuous params keep a uniform draw.
+
+      `maxLen` (seconds, 0 = off) caps the estimated audible length: FX tails are
+      trimmed first (echo, then reverb), then the amp body, to fit. */
+  randomize(randomness: number, curve: FreqCurve = FreqCurve.Linear, maxLen = 0): void {
     randomness = Math.min(1, Math.max(0, randomness));
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
@@ -176,6 +195,77 @@ export class DrumParameters {
       this.set(id, v);
     }
     this.dedupeLfoTargets();
+    this.clampLength(maxLen);
+  }
+
+  /** Rough audible length (seconds) of the current sound: amp body (attack +
+      decay + sustain-weighted release) plus the dominant FX tail (echo/reverb).
+      Shared by the length cap and the shuffle recap label. */
+  estimateLength(): number {
+    const body =
+      this.get(ParamId.AmpAttack) +
+      this.get(ParamId.AmpDecay) +
+      this.get(ParamId.AmpSustain) * this.get(ParamId.AmpRelease);
+    const echoTail =
+      this.get(ParamId.EchoMix) > ECHO_EPS
+        ? this.get(ParamId.EchoTime) *
+          echoRepeats(this.get(ParamId.EchoFeedback), this.get(ParamId.EchoMix))
+        : 0;
+    const verbTail =
+      this.get(ParamId.ReverbMix) > VERB_EPS
+        ? RV_BASE + this.get(ParamId.ReverbSize) * RV_SPAN
+        : 0;
+    return body + Math.max(echoTail, verbTail);
+  }
+
+  /** Trim FX (echo, then reverb), and finally the amp body, so the estimated
+      length fits within `maxLen` seconds. Leaves the dry drum untouched when it
+      already fits. No-op when maxLen <= 0. */
+  private clampLength(maxLen: number): void {
+    if (maxLen <= 0) return;
+    const A = this.get(ParamId.AmpAttack);
+    const D = this.get(ParamId.AmpDecay);
+    const R = this.get(ParamId.AmpRelease);
+    const body = A + D + this.get(ParamId.AmpSustain) * R;
+    const tailBudget = Math.max(0, maxLen - body);
+
+    // Echo: shorten the delay to fit the budget; disable if even a minimal echo
+    // (its shortest delay × audible repeats) won't fit.
+    if (this.get(ParamId.EchoMix) > ECHO_EPS) {
+      const reps = echoRepeats(this.get(ParamId.EchoFeedback), this.get(ParamId.EchoMix));
+      const minTime = getParamSpec(this.drum, ParamId.EchoTime).min;
+      const maxTime = reps > 0 ? tailBudget / reps : Infinity;
+      if (maxTime < minTime) this.set(ParamId.EchoMix, 0);
+      else if (this.get(ParamId.EchoTime) > maxTime) this.set(ParamId.EchoTime, maxTime);
+    }
+
+    // Reverb: shrink room size to fit; disable mix if even the smallest room
+    // tail overruns the budget.
+    if (this.get(ParamId.ReverbMix) > VERB_EPS) {
+      if (tailBudget < RV_BASE) this.set(ParamId.ReverbMix, 0);
+      else {
+        const maxSize = (tailBudget - RV_BASE) / RV_SPAN;
+        if (this.get(ParamId.ReverbSize) > maxSize) {
+          this.set(ParamId.ReverbSize, Math.max(0, maxSize));
+        }
+      }
+    }
+
+    // Body still too long on its own → scale the envelope down (FX already
+    // removed above, since tailBudget was 0). Decay/Release have non-zero floors
+    // that set() clamps to, so scale only the reducible part above each floor —
+    // that lands the body exactly on maxLen instead of stalling at the floor.
+    if (body > maxLen) {
+      const fA = baseRange(ParamId.AmpAttack).min;
+      const fD = baseRange(ParamId.AmpDecay).min;
+      const fR = baseRange(ParamId.AmpRelease).min;
+      const S = this.get(ParamId.AmpSustain);
+      const floorBody = fA + fD + S * fR;
+      const k = body > floorBody ? Math.max(0, (maxLen - floorBody) / (body - floorBody)) : 0;
+      this.set(ParamId.AmpAttack, fA + (A - fA) * k);
+      this.set(ParamId.AmpDecay, fD + (D - fD) * k);
+      this.set(ParamId.AmpRelease, fR + (R - fR) * k);
+    }
   }
 
   /** Two LFOs aimed at the same destination just double up — silence the later
@@ -226,9 +316,14 @@ export class DrumKit {
     this.undo.set(drum, stack);
   }
 
-  shuffleAll(drum: DrumType, randomness: number, curve: FreqCurve = FreqCurve.Linear): void {
+  shuffleAll(
+    drum: DrumType,
+    randomness: number,
+    curve: FreqCurve = FreqCurve.Linear,
+    maxLen = 0,
+  ): void {
     this.pushUndo(drum);
-    this.get(drum).randomize(randomness, curve);
+    this.get(drum).randomize(randomness, curve, maxLen);
   }
 
   resetAll(drum: DrumType): void {

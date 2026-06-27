@@ -31,6 +31,20 @@ const CURVE_OPTIONS: { label: string; curve: FreqCurve }[] = [
   { label: "High", curve: FreqCurve.GaussHigh },
 ];
 
+// Max audible length for a shuffled sound (0 = off). The shuffle trims FX tails,
+// then the amp body, so the estimated length fits — keeps drum hits punchy.
+const MAXLEN_OPTIONS: { label: string; seconds: number }[] = [
+  { label: "Off", seconds: 0 },
+  { label: "0.1s", seconds: 0.1 },
+  { label: "0.2s", seconds: 0.2 },
+  { label: "0.3s", seconds: 0.3 },
+  { label: "0.5s", seconds: 0.5 },
+  { label: "0.75s", seconds: 0.75 },
+  { label: "1s", seconds: 1 },
+  { label: "1.5s", seconds: 1.5 },
+  { label: "2s", seconds: 2 },
+];
+
 export interface SoundViewCallbacks {
   onChange: (drum: DrumType) => void;      // a value changed -> resend live params
   onRangeChange: (drum: DrumType) => void; // ranges changed -> resend pitch ranges
@@ -51,6 +65,7 @@ export class SoundView {
   readonly el = document.createElement("div");
   private randomness = 1.0; // single global shuffle amount (1 = uniform over range)
   private curveIdx = 1; // index into CURVE_OPTIONS (1 = Logarithmic, default)
+  private maxLenIdx = 0; // index into MAXLEN_OPTIONS (0 = Off, no length cap)
   private lastSummary = ""; // one-line recap of the most recent shuffle
 
   constructor(
@@ -288,7 +303,12 @@ export class SoundView {
     const reset = mkBtn("Reset", "cat-btn");
     back.disabled = !this.kit.canBack(drum);
     shuffle.onclick = () => {
-      this.kit.shuffleAll(drum, this.randomness, CURVE_OPTIONS[this.curveIdx].curve);
+      this.kit.shuffleAll(
+        drum,
+        this.randomness,
+        CURVE_OPTIONS[this.curveIdx].curve,
+        MAXLEN_OPTIONS[this.maxLenIdx].seconds,
+      );
       this.lastSummary = this.shuffleSummary();
       this.afterReplace();
     };
@@ -332,6 +352,25 @@ export class SoundView {
     prec.append(plbl, psel);
     head.append(prec);
 
+    // Max length: caps how long a shuffled sound can ring (FX trimmed first).
+    const maxl = document.createElement("div");
+    maxl.className = "precision";
+    const mlbl = document.createElement("span");
+    mlbl.className = "precision-lbl";
+    mlbl.textContent = "Max len";
+    const msel = document.createElement("select");
+    msel.className = "vbox-select";
+    MAXLEN_OPTIONS.forEach((o, i) => {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = o.label;
+      msel.append(opt);
+    });
+    msel.value = String(this.maxLenIdx);
+    msel.onchange = () => { this.maxLenIdx = Number(msel.value); };
+    maxl.append(mlbl, msel);
+    head.append(maxl);
+
     sec.append(head);
 
     // One-line recap of the last shuffle, e.g. "Square-159-Drive-Filter-None-1s",
@@ -359,8 +398,7 @@ export class SoundView {
     const pitch = Math.round(p.get(ParamId.Pitch));
     const lfos = [ParamId.LfoTarget, ParamId.Lfo2Target, ParamId.Lfo3Target]
       .map((id) => LFO_TARGETS[Math.round(p.get(id))]);
-    const len = p.get(ParamId.AmpDecay) + p.get(ParamId.AmpRelease);
-    const lenStr = `${+len.toFixed(2)}s`;
+    const lenStr = `${+p.estimateLength().toFixed(2)}s`;
     return [wave, pitch, ...lfos, lenStr].join("-");
   }
 
