@@ -37,6 +37,11 @@ const TWO_PI = Math.PI * 2;
 const NUM_ROWS = 5;
 const NUM_STEPS = 16;
 
+// Note-hold for sequenced hits, in seconds. Tempo-independent so a sound plays
+// its full envelope (as heard in the Sounds-view audition, which uses the same
+// 0.4s gate) instead of being cut off by the very short 16th-note step length.
+const STEP_GATE_SEC = 0.4;
+
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
 //============================================================================
@@ -515,7 +520,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       let pos = 0;
       while (pos < n) {
         if (this.samplesToNextStep <= 0) {
-          this.fireStep((this.samplesPerStep() | 0));
+          this.fireStep((this.sr * STEP_GATE_SEC) | 0);
           this.samplesToNextStep += this.samplesPerStep();
         }
         let chunk = Math.min(n - pos, Math.ceil(this.samplesToNextStep));
