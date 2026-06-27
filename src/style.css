@@ -332,6 +332,57 @@ button:active { transform: scale(0.97); }
   .cat-params { grid-template-columns: repeat(3, 1fr); }
 }
 
+/* --- mixer --- */
+.mixer-open-btn {
+  width: 100%;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  font-weight: 600; font-size: 14px; background: var(--panel2);
+}
+.mixer-head { display: flex; align-items: center; gap: 12px; }
+.mixer-back { background: transparent; border: none; color: var(--muted); padding: 6px 4px; font-size: 15px; }
+.mixer-back:active { color: var(--text); }
+.mixer-title { margin: 0; font-size: 18px; font-weight: 600; }
+
+.mixer-list { display: flex; flex-direction: column; gap: 10px; }
+.mix-strip {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  border-left: 4px solid var(--lane);
+}
+.mix-strip-head { display: flex; align-items: center; gap: 10px; }
+.mix-led {
+  width: 14px; height: 14px; flex: none; border-radius: 50%;
+  background: var(--lane); opacity: 0.28;
+  box-shadow: 0 0 0 0 var(--lane);
+}
+.mix-led.flash { animation: mix-flash 0.4s ease-out; }
+@keyframes mix-flash {
+  0% { opacity: 1; box-shadow: 0 0 10px 2px var(--lane); }
+  100% { opacity: 0.28; box-shadow: 0 0 0 0 var(--lane); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mix-led.flash { animation: none; }
+}
+.mix-name {
+  flex: 1; min-width: 0; font-weight: 600; font-size: 14px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mix-toggles { display: flex; gap: 6px; flex: none; }
+.mix-toggle {
+  width: 34px; padding: 6px 0; text-align: center; font-weight: 700; font-size: 13px;
+  background: var(--panel2); color: var(--muted);
+}
+.mix-toggle.mute.on { background: #ff453a; color: #fff; border-color: #ff453a; }
+.mix-toggle.solo.on { background: var(--accent); color: #15161a; border-color: var(--accent); }
+
+.mix-fader { display: flex; align-items: center; gap: 10px; }
+.mix-fader-lbl { width: 34px; flex: none; font-size: 12px; color: var(--muted); }
+.mix-fader input[type="range"] { flex: 1; min-width: 0; }
+.mix-fader-val {
+  width: 30px; flex: none; text-align: right; font-size: 12px;
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+
 /* confetti burst on save */
 .confetti { position: fixed; inset: 0; pointer-events: none; z-index: 9999; overflow: hidden; }
 .confetti-piece {

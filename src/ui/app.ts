@@ -28,12 +28,14 @@ interface Lane {
   snapshot: number[];
   color: string;
   pitch: [number, number]; // Pitch range for melody mapping
+  mute?: boolean; // mixer: silenced
+  solo?: boolean; // mixer: when any lane is soloed, only soloed lanes are audible
 }
 
 const PROJECT_KEY = "msq010.project";
 const ORDER_VIEW = NUM_BLOCKS; // workspace value for the order list
 
-type View = "grid" | "sound";
+type View = "grid" | "sound" | "mixer";
 
 export class App {
   private engine = new EngineHost();
@@ -61,6 +63,8 @@ export class App {
   private gridView = new GridView(this.arr.blocks[0]);
   private loopTimeEl: HTMLElement | null = null;
   private orderSlotEls: HTMLElement[] | null = null;
+  // Channel -> flash LED, populated while the Mixer view is shown.
+  private mixerLeds: Map<number, HTMLElement> | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -79,6 +83,15 @@ export class App {
     if (this.orderSlotEls) {
       this.orderSlotEls.forEach((el, i) => el.classList.toggle("playing", i === p.slot));
     }
+    if (this.mixerLeds) {
+      for (const ch of p.fired) {
+        const led = this.mixerLeds.get(ch);
+        if (!led) continue;
+        led.classList.remove("flash");
+        void led.offsetWidth; // restart the fade animation on a repeat trigger
+        led.classList.add("flash");
+      }
+    }
   }
 
   // --- engine sync ------------------------------------------------------
@@ -91,9 +104,26 @@ export class App {
     this.engine.setTempo(this.tempo);
   }
 
-  /** Push each lane's snapshot to its own engine channel. */
+  /** Push each lane's snapshot to its own engine channel (mute/solo applied). */
   private pushLanes(): void {
-    for (const lane of this.lanes) this.engine.setParams(lane.drum, lane.snapshot);
+    for (const lane of this.lanes) this.pushLane(lane);
+  }
+
+  /** True while at least one lane is soloed (so the rest are silenced). */
+  private anySolo(): boolean {
+    return this.lanes.some((l) => l.solo);
+  }
+
+  /** A lane is heard unless it's muted or another lane has stolen solo. */
+  private laneAudible(lane: Lane): boolean {
+    return !lane.mute && (!this.anySolo() || !!lane.solo);
+  }
+
+  /** Push one lane's params, zeroing Volume when it's muted/soloed out. */
+  private pushLane(lane: Lane): void {
+    const snap = lane.snapshot.slice();
+    if (!this.laneAudible(lane)) snap[ParamId.Volume] = 0;
+    this.engine.setParams(lane.drum, snap);
   }
 
   /** Send Pitch ranges for the melody mapping: the editor voice + each lane use
@@ -252,6 +282,7 @@ export class App {
     this.root.innerHTML = "";
     this.loopTimeEl = null;
     this.orderSlotEls = null;
+    this.mixerLeds = null;
 
     const bar = document.createElement("header");
     bar.className = "topbar";
@@ -263,6 +294,7 @@ export class App {
     this.root.append(this.viewRoot);
 
     if (this.view === "grid") this.renderGrid();
+    else if (this.view === "mixer") this.renderMixer();
     else this.renderSound();
   }
 
@@ -272,7 +304,9 @@ export class App {
     for (const v of ["grid", "sound"] as View[]) {
       const b = document.createElement("button");
       b.textContent = v === "grid" ? "Steps" : "Sounds";
-      b.className = "seg-btn" + (this.view === v ? " on" : "");
+      // The Mixer is a sub-view of Steps, so it keeps the Steps segment lit.
+      const active = v === "grid" ? this.view !== "sound" : this.view === "sound";
+      b.className = "seg-btn" + (active ? " on" : "");
       b.onclick = () => {
         if (this.view === v) return;
         this.view = v;
@@ -377,6 +411,7 @@ export class App {
       v.append(gridWrap);
 
       v.append(this.scaleControls());
+      v.append(this.mixerButton());
       v.append(this.laneSelector());
 
       requestAnimationFrame(() => this.gridView.layout());
@@ -447,6 +482,125 @@ export class App {
     return row;
   }
 
+  /** Button below the scale controls that opens the per-lane mixer view. */
+  private mixerButton(): HTMLElement {
+    const b = document.createElement("button");
+    b.className = "mixer-open-btn";
+    b.textContent = "🎚 Mixer";
+    b.onclick = () => { this.view = "mixer"; this.render(); };
+    return b;
+  }
+
+  // --- mixer view -------------------------------------------------------
+  // One channel strip per lane in the loop: a colour LED that flashes when the
+  // lane triggers, a Volume fader, Mute/Solo, and a Reverb send. Volume/Reverb
+  // write straight into the lane snapshot (Volume = index 22, ReverbMix = 21);
+  // Mute/Solo are applied at push time by zeroing Volume.
+  private renderMixer(): void {
+    const v = this.viewRoot;
+    this.mixerLeds = new Map();
+
+    const head = document.createElement("div");
+    head.className = "mixer-head";
+    const back = document.createElement("button");
+    back.className = "mixer-back";
+    back.textContent = "‹ Steps";
+    back.onclick = () => { this.view = "grid"; this.render(); };
+    const title = document.createElement("h2");
+    title.className = "mixer-title";
+    title.textContent = "Mixer";
+    head.append(back, title);
+    v.append(head);
+
+    if (this.lanes.length === 0) {
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "No sounds yet. Add some in the Steps view, then mix them here.";
+      v.append(hint);
+      return;
+    }
+
+    const list = document.createElement("div");
+    list.className = "mixer-list";
+    this.lanes.forEach((lane) => list.append(this.mixerStrip(lane)));
+    v.append(list);
+  }
+
+  /** A single mixer channel strip for one lane. */
+  private mixerStrip(lane: Lane): HTMLElement {
+    const strip = document.createElement("div");
+    strip.className = "mix-strip";
+    strip.style.setProperty("--lane", lane.color);
+
+    // Header: flashing LED + name.
+    const hd = document.createElement("div");
+    hd.className = "mix-strip-head";
+    const led = document.createElement("span");
+    led.className = "mix-led";
+    this.mixerLeds!.set(lane.drum, led);
+    const name = document.createElement("span");
+    name.className = "mix-name";
+    name.textContent = lane.name;
+
+    const toggles = document.createElement("div");
+    toggles.className = "mix-toggles";
+    const mute = document.createElement("button");
+    mute.className = "mix-toggle mute" + (lane.mute ? " on" : "");
+    mute.textContent = "M";
+    mute.title = "Mute";
+    const solo = document.createElement("button");
+    solo.className = "mix-toggle solo" + (lane.solo ? " on" : "");
+    solo.textContent = "S";
+    solo.title = "Solo";
+    mute.onclick = () => {
+      lane.mute = !lane.mute;
+      mute.classList.toggle("on", lane.mute);
+      this.pushLanes(); // mute/solo affect every lane's audibility
+      this.persist();
+    };
+    solo.onclick = () => {
+      lane.solo = !lane.solo;
+      solo.classList.toggle("on", !!lane.solo);
+      this.pushLanes();
+      this.persist();
+    };
+    toggles.append(mute, solo);
+    hd.append(led, name, toggles);
+    strip.append(hd);
+
+    // Faders: Volume + Reverb send, both 0..1 written into the snapshot.
+    strip.append(this.mixFader("Vol", lane, ParamId.Volume));
+    strip.append(this.mixFader("Verb", lane, ParamId.ReverbMix));
+    return strip;
+  }
+
+  /** A labelled 0..1 fader bound to one snapshot index of a lane. */
+  private mixFader(label: string, lane: Lane, id: ParamId): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "mix-fader";
+    const lbl = document.createElement("span");
+    lbl.className = "mix-fader-lbl";
+    lbl.textContent = label;
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "1";
+    slider.step = "0.02";
+    slider.value = String(lane.snapshot[id] ?? 0);
+    const val = document.createElement("span");
+    val.className = "mix-fader-val";
+    const pct = (x: number) => `${Math.round(x * 100)}`;
+    val.textContent = pct(Number(slider.value));
+    slider.oninput = () => {
+      lane.snapshot[id] = Number(slider.value);
+      val.textContent = pct(Number(slider.value));
+      this.pushLane(lane);
+      this.persist();
+    };
+    row.append(lbl, slider, val);
+    return row;
+  }
+
   // --- paint lanes ------------------------------------------------------
   /** Drum index the grid paints, or -1 when no lane is selected. */
   private activeDrumForPaint(): number {
@@ -498,7 +652,7 @@ export class App {
     const lane = this.lanes[i];
     if (!lane) return;
     // The lane already owns its channel + params; just paint with it and preview.
-    this.engine.setParams(lane.drum, lane.snapshot);
+    this.pushLane(lane);
     this.gridView.setActiveDrum(lane.drum);
     this.auditionLane(lane);
     this.persist();
@@ -575,7 +729,7 @@ export class App {
       pitch: [sound.pitch[0], sound.pitch[1]],
     };
     this.lanes.push(lane);
-    this.engine.setParams(channel, lane.snapshot);
+    this.pushLane(lane);
     this.pushPitchRanges();
     this.selectLane(this.lanes.length - 1);
   }

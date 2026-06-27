@@ -12,6 +12,8 @@ export interface LaneJSON {
   snapshot: number[];
   color?: string; // absent in older saves
   pitch?: [number, number]; // absent in older saves
+  mute?: boolean; // mixer state; absent in older saves
+  solo?: boolean;
 }
 
 export interface ProjectJSON {
@@ -50,6 +52,7 @@ export function serialize(
     soundName,
     lanes: lanes.map((l) => ({
       drum: l.drum, name: l.name, snapshot: l.snapshot.slice(), color: l.color, pitch: l.pitch,
+      mute: l.mute, solo: l.solo,
     })),
   };
 }
@@ -72,6 +75,8 @@ export function deserialize(
         snapshot: l.snapshot.slice(),
         color: l.color ?? "#888888",
         pitch: Array.isArray(l.pitch) && l.pitch.length === 2 ? [l.pitch[0], l.pitch[1]] : [pitchVal * 0.5, pitchVal * 2],
+        mute: !!l.mute,
+        solo: !!l.solo,
       });
     }
   }

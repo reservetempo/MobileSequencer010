@@ -439,12 +439,13 @@ class EngineProcessor extends AudioWorkletProcessor {
     return (this.sr * 60) / Math.max(1, this.tempo) / 4;
   }
 
-  reportPlayhead(grid, col, slot) {
+  reportPlayhead(grid, col, slot, fired) {
     if (grid !== this.lastGrid || col !== this.lastCol || slot !== this.lastSlot) {
       this.lastGrid = grid;
       this.lastCol = col;
       this.lastSlot = slot;
-      this.port.postMessage({ type: "playhead", grid, col, slot });
+      // `fired` = drum channels triggered on this step, for the mixer's flash LEDs.
+      this.port.postMessage({ type: "playhead", grid, col, slot, fired: fired || [] });
     }
   }
 
@@ -471,6 +472,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     const col = this.seqPos % NUM_STEPS;
     const g = blocks[entry.grid];
 
+    const fired = [];
     for (let row = 0; row < NUM_ROWS; row++) {
       const drum = g.cells[row * NUM_STEPS + col];
       if (drum < 0 || drum >= NUM_DRUMS) continue;
@@ -481,9 +483,10 @@ class EngineProcessor extends AudioWorkletProcessor {
       const range = this.pitchRanges[drum];
       if (range) snap[P.Pitch] = frequencyFor(row, g.root, g.scale, range[0], range[1]); // ...pitched
       ch.trigger(snap, gate);
+      fired.push(drum);
     }
 
-    this.reportPlayhead(entry.grid, col, entry.slot);
+    this.reportPlayhead(entry.grid, col, entry.slot, fired);
 
     this.seqPos = (this.seqPos + 1) % total;
     if (this.seqPos === 0) this.promotePending(); // loop completed -> apply staged edits

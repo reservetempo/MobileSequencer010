@@ -6,6 +6,7 @@ export interface Playhead {
   grid: number; // -1 when stopped / nothing playing
   col: number;
   slot: number; // index in the order list (-1 when stopped)
+  fired: number[]; // drum channels triggered on this step (for the mixer flash)
 }
 
 export class EngineHost {
@@ -38,7 +39,7 @@ export class EngineHost {
     });
     this.node.port.onmessage = (e) => {
       const m = e.data;
-      if (m.type === "playhead") this.onPlayhead?.({ grid: m.grid, col: m.col, slot: m.slot });
+      if (m.type === "playhead") this.onPlayhead?.({ grid: m.grid, col: m.col, slot: m.slot, fired: m.fired ?? [] });
     };
     this.node.connect(this.ctx.destination);
     await this.ctx.resume();
