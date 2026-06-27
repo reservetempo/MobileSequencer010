@@ -5,13 +5,13 @@
 // exceed the preset range (clamped only to the absolute base range); and the LFO block
 // split into three independent sections, each with a destination dropdown.
 
-import { DrumKit } from "../model/drumKit";
+import { DrumKit, FreqCurve } from "../model/drumKit";
 import { SoundLibrary } from "../model/soundLibrary";
 import { DrumType } from "../model/drums";
 import {
   ParamId, ParamGroup, NUM_PARAMS, getParamGroup, getParamGroupName,
 } from "../model/params";
-import { getParamSpec, formatValue, isDiscrete } from "../model/paramSpec";
+import { getParamSpec, formatValue, isDiscrete, LFO_TARGETS } from "../model/paramSpec";
 import { FACTORY_PRESETS, Preset } from "../model/presets";
 import { burstConfetti } from "./confetti";
 
@@ -20,16 +20,15 @@ const ALL_GROUPS = [
   ParamGroup.Output,
 ];
 
-// Shuffle precision: snaps continuous results to a multiple of (param step x mult).
-// "Any" (0) keeps full precision; higher = coarser, fewer options to shuffle between.
-const PRECISION_OPTIONS: { label: string; mult: number }[] = [
-  { label: "Any", mult: 0 },
-  { label: "Whole", mult: 1 },
-  { label: "Evens", mult: 2 },
-  { label: "5s", mult: 5 },
-  { label: "10s", mult: 10 },
-  { label: "25s", mult: 25 },
-  { label: "50s", mult: 50 },
+// Shuffle frequency spread: how Pitch & Filter Cutoff are randomly distributed.
+// "Linear" is uniform in Hz (high-heavy); the others spread the draw the way the
+// ear hears pitch (logarithmically). See FreqCurve.
+const CURVE_OPTIONS: { label: string; curve: FreqCurve }[] = [
+  { label: "Linear", curve: FreqCurve.Linear },
+  { label: "Logarithmic", curve: FreqCurve.Log },
+  { label: "Bass", curve: FreqCurve.GaussLow },
+  { label: "Mid", curve: FreqCurve.GaussMid },
+  { label: "High", curve: FreqCurve.GaussHigh },
 ];
 
 export interface SoundViewCallbacks {
@@ -51,7 +50,8 @@ const SAVE_PALETTE = [
 export class SoundView {
   readonly el = document.createElement("div");
   private randomness = 1.0; // single global shuffle amount (1 = uniform over range)
-  private precisionIdx = 0; // index into PRECISION_OPTIONS (0 = Any/full precision)
+  private curveIdx = 1; // index into CURVE_OPTIONS (1 = Logarithmic, default)
+  private lastSummary = ""; // one-line recap of the most recent shuffle
 
   constructor(
     private kit: DrumKit,
@@ -288,11 +288,12 @@ export class SoundView {
     const reset = mkBtn("Reset", "cat-btn");
     back.disabled = !this.kit.canBack(drum);
     shuffle.onclick = () => {
-      this.kit.shuffleAll(drum, this.randomness, PRECISION_OPTIONS[this.precisionIdx].mult);
+      this.kit.shuffleAll(drum, this.randomness, CURVE_OPTIONS[this.curveIdx].curve);
+      this.lastSummary = this.shuffleSummary();
       this.afterReplace();
     };
-    reset.onclick = () => { this.kit.resetAll(drum); this.afterReplace(); };
-    back.onclick = () => { if (this.kit.backAll(drum)) this.afterReplace(); };
+    reset.onclick = () => { this.lastSummary = ""; this.kit.resetAll(drum); this.afterReplace(); };
+    back.onclick = () => { if (this.kit.backAll(drum)) { this.lastSummary = ""; this.afterReplace(); } };
     head.append(shuffle, back, reset);
 
     const rnd = document.createElement("div");
@@ -312,27 +313,55 @@ export class SoundView {
     rnd.append(slider, lbl);
     head.append(rnd);
 
-    // Precision: how coarsely shuffled values snap (fewer options as you go right).
+    // Spread: how Pitch & Cutoff are distributed when shuffled (Linear = high-heavy).
     const prec = document.createElement("div");
     prec.className = "precision";
     const plbl = document.createElement("span");
     plbl.className = "precision-lbl";
-    plbl.textContent = "Precision";
+    plbl.textContent = "Spread";
     const psel = document.createElement("select");
     psel.className = "vbox-select";
-    PRECISION_OPTIONS.forEach((o, i) => {
+    CURVE_OPTIONS.forEach((o, i) => {
       const opt = document.createElement("option");
       opt.value = String(i);
       opt.textContent = o.label;
       psel.append(opt);
     });
-    psel.value = String(this.precisionIdx);
-    psel.onchange = () => { this.precisionIdx = Number(psel.value); };
+    psel.value = String(this.curveIdx);
+    psel.onchange = () => { this.curveIdx = Number(psel.value); };
     prec.append(plbl, psel);
     head.append(prec);
 
     sec.append(head);
+
+    // One-line recap of the last shuffle, e.g. "Square-159-Drive-Filter-None-1s",
+    // with a play button to re-audition the current sound.
+    if (this.lastSummary) {
+      const row = document.createElement("div");
+      row.className = "shuffle-summary";
+      const play = mkBtn("▶", "summary-play");
+      play.title = "Play sound";
+      play.onclick = () => this.cb.onAudition(drum);
+      const txt = document.createElement("span");
+      txt.textContent = this.lastSummary;
+      row.append(play, txt);
+      sec.append(row);
+    }
     return sec;
+  }
+
+  // Compact description of the current sound: wave, pitch, the three LFO
+  // destinations, and the amp tail length. e.g. "Square-159-Drive-Filter-None-1s".
+  private shuffleSummary(): string {
+    const p = this.kit.get(this.drum);
+    const wave = getParamSpec(this.drum, ParamId.Waveform)
+      .choices![Math.round(p.get(ParamId.Waveform))];
+    const pitch = Math.round(p.get(ParamId.Pitch));
+    const lfos = [ParamId.LfoTarget, ParamId.Lfo2Target, ParamId.Lfo3Target]
+      .map((id) => LFO_TARGETS[Math.round(p.get(id))]);
+    const len = p.get(ParamId.AmpDecay) + p.get(ParamId.AmpRelease);
+    const lenStr = `${+len.toFixed(2)}s`;
+    return [wave, pitch, ...lfos, lenStr].join("-");
   }
 
   private category(g: ParamGroup): HTMLElement {

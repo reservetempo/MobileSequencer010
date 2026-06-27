@@ -6,10 +6,52 @@
 
 import { DrumType } from "./drums";
 import { ParamId, NUM_PARAMS } from "./params";
-import { getParamSpec, baseRange, isDiscrete } from "./paramSpec";
+import { getParamSpec, baseRange, isDiscrete, LFO_TARGETS } from "./paramSpec";
 import { Preset, defaultPresetFor, FACTORY_PRESETS } from "./presets";
 
 export type Snapshot = number[];
+
+// Distribution curve for the Shuffle random draw of FREQUENCY params (Pitch &
+// Filter Cutoff). Pitch perception is logarithmic, so a uniform-in-Hz draw
+// ("Linear") lands most picks in the perceptual high range — the others reshape
+// the draw to spread it the way the ear hears it.
+export enum FreqCurve {
+  Linear,    // uniform in Hz (legacy behaviour) — high-heavy
+  Log,       // equal weight per octave (MIDI-like) — naturally bass-heavier
+  GaussLow,  // bell in log-space centred low (bass)
+  GaussMid,  // bell centred mid
+  GaussHigh, // bell centred high
+}
+
+const GAUSS_SIGMA = 0.18; // spread of the Gaussian curves (in normalised log-space)
+const GAUSS_MU: Record<number, number> = {
+  [FreqCurve.GaussLow]: 0.15,
+  [FreqCurve.GaussMid]: 0.5,
+  [FreqCurve.GaussHigh]: 0.85,
+};
+
+// A standard-normal sample via Box–Muller.
+function randNormal(): number {
+  const u1 = Math.random() || 1e-9; // avoid log(0)
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Draw a frequency in [lo, hi] (both > 0) shaped by `curve`. Log/Gaussian options
+// work in normalised log-position p∈[0,1] and map back with lo·(hi/lo)^p.
+export function sampleFreq(curve: FreqCurve, lo: number, hi: number): number {
+  if (hi <= lo) return lo;
+  if (curve === FreqCurve.Linear) return lo + Math.random() * (hi - lo);
+  const ratio = hi / lo;
+  let p: number;
+  if (curve === FreqCurve.Log) {
+    p = Math.random();
+  } else {
+    const mu = GAUSS_MU[curve] ?? 0.5;
+    p = Math.min(1, Math.max(0, mu + GAUSS_SIGMA * randNormal()));
+  }
+  return lo * Math.pow(ratio, p);
+}
 
 export class DrumParameters {
   readonly drum: DrumType;
@@ -109,10 +151,10 @@ export class DrumParameters {
       destinations while Full Range also shuffles waves/filters. The shuffle amount
       is the probability that each discrete param rerolls.
 
-      `precision` coarsens the result: when > 0, each continuous value snaps to a
-      multiple of (its spec step x precision) — so 1 = whole steps, 2 = evens,
-      5 = fives, 10 = tens, etc. 0 leaves the raw (finest) value. */
-  randomize(randomness: number, precision = 0): void {
+      `curve` reshapes the random draw of the FREQUENCY params (Pitch & Filter
+      Cutoff) so highs don't dominate perceptually — see {@link FreqCurve}. All
+      other continuous params keep a uniform draw. */
+  randomize(randomness: number, curve: FreqCurve = FreqCurve.Linear): void {
     randomness = Math.min(1, Math.max(0, randomness));
     for (let i = 0; i < NUM_PARAMS; i++) {
       const id = i as ParamId;
@@ -129,12 +171,24 @@ export class DrumParameters {
       const cur = this.get(id);
       const lo = cur + (this.lo[id] - cur) * randomness;
       const hi = cur + (this.hi[id] - cur) * randomness;
-      let v = lo + Math.random() * (hi - lo);
-      if (precision > 0 && s.step > 0) {
-        const q = s.step * precision;
-        v = Math.min(this.hi[id], Math.max(this.lo[id], Math.round(v / q) * q));
-      }
+      const isFreq = id === ParamId.Pitch || id === ParamId.FilterCutoff;
+      const v = isFreq ? sampleFreq(curve, lo, hi) : lo + Math.random() * (hi - lo);
       this.set(id, v);
+    }
+    this.dedupeLfoTargets();
+  }
+
+  /** Two LFOs aimed at the same destination just double up — silence the later
+      duplicate(s) by switching them to "None". Duplicate "None"s are fine. */
+  private dedupeLfoTargets(): void {
+    const NONE = LFO_TARGETS.length - 1;
+    const slots = [ParamId.LfoTarget, ParamId.Lfo2Target, ParamId.Lfo3Target];
+    const seen = new Set<number>();
+    for (const id of slots) {
+      const t = Math.round(this.get(id));
+      if (t === NONE) continue;
+      if (seen.has(t)) this.set(id, NONE);
+      else seen.add(t);
     }
   }
 }
@@ -172,9 +226,9 @@ export class DrumKit {
     this.undo.set(drum, stack);
   }
 
-  shuffleAll(drum: DrumType, randomness: number, precision = 0): void {
+  shuffleAll(drum: DrumType, randomness: number, curve: FreqCurve = FreqCurve.Linear): void {
     this.pushUndo(drum);
-    this.get(drum).randomize(randomness, precision);
+    this.get(drum).randomize(randomness, curve);
   }
 
   resetAll(drum: DrumType): void {

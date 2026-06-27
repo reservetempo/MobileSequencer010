@@ -287,6 +287,26 @@ button:active { transform: scale(0.97); }
 .precision { display: flex; align-items: center; gap: 8px; width: 100%; }
 .precision-lbl { color: var(--muted); font-size: 12px; }
 .precision select { flex: 1; }
+.shuffle-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
+  word-break: break-word;
+}
+.summary-play {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 11px;
+  line-height: 1;
+}
 
 .cat-params { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
 .vbox { display: flex; flex-direction: column; gap: 5px; }
