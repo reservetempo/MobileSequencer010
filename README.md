@@ -15,7 +15,7 @@ using any drum's timbre, pitched to a chosen key and scale.
   one loop via the order list.
 - **Sounds view** — a full per-parameter editor with one-tap **Shuffle / Back /
   Reset**, a Randomness amount, frequency Spread and Max-length controls, plus
-  saving and recalling named sounds.
+  saving and recalling named sounds organised into collapsible folders.
 - **Save/load** projects (localStorage autosave + JSON file), installable PWA with
   offline support.
 

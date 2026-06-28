@@ -10,6 +10,7 @@ export interface SavedSound {
   snapshot: number[];
   color: string;
   pitch: [number, number]; // [lo, hi] Pitch range for melody mapping
+  folder: string;          // organising folder, "" = ungrouped
 }
 
 const STORAGE_KEY = "msq010.sounds";
@@ -33,13 +34,32 @@ export class SoundLibrary {
     return out;
   }
 
-  add(drum: DrumType, name: string, snapshot: number[], color: string, pitch: [number, number]): void {
+  /** Distinct folder names in use for a drum (excludes the "" ungrouped bucket), sorted. */
+  folders(drum: DrumType): string[] {
+    const names = new Set<string>();
+    for (const s of this.list(drum)) if (s.folder) names.add(s.folder);
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }
+
+  add(
+    drum: DrumType, name: string, snapshot: number[], color: string,
+    pitch: [number, number], folder = "",
+  ): void {
     const list = this.data.get(drum) ?? [];
     const existing = list.findIndex((s) => s.name === name);
-    const entry: SavedSound = { name, snapshot: snapshot.slice(), color, pitch: [pitch[0], pitch[1]] };
+    const entry: SavedSound = { name, snapshot: snapshot.slice(), color, pitch: [pitch[0], pitch[1]], folder };
     if (existing >= 0) list[existing] = entry;
     else list.push(entry);
     this.data.set(drum, list);
+    this.save();
+  }
+
+  /** Move a saved sound into a folder ("" = ungrouped). */
+  setFolder(drum: DrumType, name: string, folder: string): void {
+    const list = this.data.get(drum);
+    const s = list?.find((x) => x.name === name);
+    if (!s) return;
+    s.folder = folder;
     this.save();
   }
 
@@ -89,5 +109,6 @@ function normalize(s: Partial<SavedSound>): SavedSound {
     snapshot,
     color: typeof s.color === "string" ? s.color : DEFAULT_COLOR,
     pitch,
+    folder: typeof s.folder === "string" ? s.folder : "",
   };
 }

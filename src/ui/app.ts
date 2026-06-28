@@ -701,26 +701,45 @@ export class App {
     panel.className = "sound-picker";
 
     const items = this.library.all();
+
+    const makeItem = (it: SavedSound, inFolder: boolean) => {
+      const b = document.createElement("button");
+      b.className = "pick-item" + (inFolder ? " in-folder" : "");
+      const sw = document.createElement("span");
+      sw.className = "swatch";
+      sw.style.background = it.color;
+      const name = document.createElement("span");
+      name.textContent = it.name;
+      b.append(sw, name);
+      b.onclick = () => { panel.remove(); this.addLane(it); };
+      return b;
+    };
+
     if (items.length === 0) {
       const empty = document.createElement("p");
       empty.className = "hint";
       empty.textContent = "No saved sounds yet. Save some in the Sounds view.";
       panel.append(empty);
     } else {
-      for (const it of items) {
-        const b = document.createElement("button");
-        const sw = document.createElement("span");
-        sw.className = "swatch";
-        sw.style.background = it.color;
-        const name = document.createElement("span");
-        name.textContent = it.name;
-        b.append(sw, name);
-        b.onclick = () => {
-          panel.remove();
-          this.addLane(it);
-        };
-        panel.append(b);
-      }
+      // Group by folder name (folders can span drums), each collapsible, ungrouped last.
+      const folderNames = [...new Set(items.filter((s) => s.folder).map((s) => s.folder))]
+        .sort((a, b) => a.localeCompare(b));
+      const collapsed = new Set<string>();
+      const render = () => {
+        panel.innerHTML = "";
+        for (const f of folderNames) {
+          const group = items.filter((s) => s.folder === f);
+          const open = !collapsed.has(f);
+          const head = document.createElement("button");
+          head.className = "saved-folder-head";
+          head.textContent = `${open ? "▾" : "▸"} ${f} (${group.length})`;
+          head.onclick = () => { if (open) collapsed.add(f); else collapsed.delete(f); render(); };
+          panel.append(head);
+          if (open) for (const it of group) panel.append(makeItem(it, true));
+        }
+        for (const it of items.filter((s) => !s.folder)) panel.append(makeItem(it, false));
+      };
+      render();
     }
 
     anchor.append(panel);

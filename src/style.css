@@ -173,11 +173,12 @@ button:active { transform: scale(0.97); }
   border-radius: 10px; padding: 6px; min-width: 200px; max-width: 280px;
   max-height: 50vh; overflow-y: auto;
 }
-.sound-picker button {
+.sound-picker .pick-item {
   display: flex; align-items: center; gap: 8px; text-align: left;
   background: transparent; border: none; padding: 9px 10px;
 }
-.sound-picker button:active { background: var(--panel); }
+.sound-picker .pick-item:active { background: var(--panel); }
+.sound-picker .pick-item.in-folder { margin-left: 10px; }
 .sound-picker .hint { padding: 8px 10px; }
 
 /* order editor */
@@ -284,6 +285,19 @@ button:active { transform: scale(0.97); }
 }
 .saved-del:active { color: var(--text); }
 .saved-list .hint { padding: 8px 10px; }
+.saved-folder-head {
+  text-align: left; background: var(--panel); border: 1px solid var(--line);
+  color: var(--text); border-radius: 8px; padding: 7px 10px;
+  font-size: 12px; font-weight: 600; margin-top: 2px;
+}
+.saved-folder-head:active { background: var(--panel2); }
+.saved-item.in-folder { margin-left: 10px; }
+.saved-move {
+  flex: none; max-width: 92px; font: inherit; font-size: 11px;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 4px;
+}
+.save-folder-select { width: 100%; box-sizing: border-box; margin-bottom: 10px; }
 
 .cat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
 .cat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
