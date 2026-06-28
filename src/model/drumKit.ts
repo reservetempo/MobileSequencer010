@@ -6,7 +6,7 @@
 
 import { DrumType } from "./drums";
 import { ParamId, NUM_PARAMS } from "./params";
-import { getParamSpec, baseRange, isDiscrete, LFO_TARGETS } from "./paramSpec";
+import { getParamSpec, baseRange, isDiscrete, LFO_TARGETS, OSC_MOD_TYPES, NOISE_TYPES } from "./paramSpec";
 import { Preset, defaultPresetFor, FACTORY_PRESETS } from "./presets";
 
 export type Snapshot = number[];
@@ -29,6 +29,22 @@ const GAUSS_MU: Record<number, number> = {
   [FreqCurve.GaussMid]: 0.5,
   [FreqCurve.GaussHigh]: 0.85,
 };
+
+// How many effect/filter "modules" a shuffle leaves active at once (there are 13 in
+// all — see soundModules). Weighted toward a handful so a sound is usually doing a
+// few things, but it can occasionally run most of them at once for a dense result.
+function sparsityBudget(): number {
+  const r = Math.random();
+  if (r < 0.08) return 1;
+  if (r < 0.24) return 2;
+  if (r < 0.44) return 3;
+  if (r < 0.62) return 4;
+  if (r < 0.76) return 5;
+  if (r < 0.86) return 6;
+  if (r < 0.93) return 7;
+  if (r < 0.97) return 9;
+  return 12;
+}
 
 // A standard-normal sample via Box–Muller.
 function randNormal(): number {
@@ -171,6 +187,10 @@ export class DrumParameters {
       Cutoff) so highs don't dominate perceptually — see {@link FreqCurve}. All
       other continuous params keep a uniform draw.
 
+      After the draw, {@link applySparsity} switches off a random subset of the
+      effect/filter modules so a sound is usually only doing 1-3 things at once
+      instead of everything at full tilt — the count itself varies per shuffle.
+
       `maxLen` (seconds, 0 = off) caps the estimated audible length: FX tails are
       trimmed first (echo, then reverb), then the amp body, to fit. */
   randomize(randomness: number, curve: FreqCurve = FreqCurve.Linear, maxLen = 0): void {
@@ -195,7 +215,105 @@ export class DrumParameters {
       this.set(id, v);
     }
     this.dedupeLfoTargets();
+    this.applySparsity(randomness);
+    if (randomness > 0) this.ensureAudibleLevel();
     this.clampLength(maxLen);
+  }
+
+  /** Keep a shuffled sound from coming out near-silent. Two common causes on a wide
+      (Full Range) draw: the Tone and Noise source levels both land low, or the
+      filter is set to cut the fundamental (LP below it / HP above it). This lifts
+      the louder source up to a floor (preserving the tone/noise balance) and pulls a
+      pathological cutoff back so the fundamental still passes — without flattening
+      the variety (dark/bright/dull sounds are all still reachable). */
+  private ensureAudibleLevel(): void {
+    const SRC_FLOOR = 0.6; // the louder of tone/noise reaches at least this
+    const tone = this.get(ParamId.ToneLevel);
+    const noise = this.get(ParamId.NoiseLevel);
+    const peak = Math.max(tone, noise);
+    if (peak < 1e-3) {
+      this.set(ParamId.ToneLevel, SRC_FLOOR); // both sources silent — give it a voice
+    } else if (peak < SRC_FLOOR) {
+      const k = SRC_FLOOR / peak;
+      this.set(ParamId.ToneLevel, tone * k);
+      this.set(ParamId.NoiseLevel, noise * k);
+    }
+
+    // Keep the filter from silencing the fundamental (gentle: dark/thin still OK).
+    const ftype = Math.round(this.get(ParamId.FilterType));
+    const pitch = this.get(ParamId.Pitch);
+    const cutoff = this.get(ParamId.FilterCutoff);
+    if (ftype === 0 && cutoff < pitch * 0.6) this.set(ParamId.FilterCutoff, pitch * 0.6); // LP
+    else if (ftype === 1 && cutoff > pitch * 1.6) this.set(ParamId.FilterCutoff, pitch * 1.6); // HP
+    else if (ftype === 2) { // BP: keep the band within reach of the tone
+      this.set(ParamId.FilterCutoff, Math.min(pitch * 6, Math.max(pitch * 0.3, cutoff)));
+    }
+  }
+
+  /** The toggleable effect/filter/modulation "modules" of the voice, each with its
+      display name (for the recap), whether it's currently audible, and how to switch
+      it off. The core tone (osc/pitch/wave/noise level) and the amp envelope are NOT
+      modules — they always define the sound. Listed in routing order. */
+  private soundModules(): { name: string; on: boolean; off: () => void }[] {
+    const NONE = LFO_TARGETS.length - 1;
+    const g = (id: ParamId) => this.get(id);
+    const round = (id: ParamId) => Math.round(g(id));
+    const lfo = (t: ParamId, d: ParamId) => ({
+      name: LFO_TARGETS[round(t)],
+      on: round(t) !== NONE && g(d) > 0.001,
+      off: () => this.set(t, NONE),
+    });
+    return [
+      lfo(ParamId.LfoTarget, ParamId.LfoDepth),
+      lfo(ParamId.Lfo2Target, ParamId.Lfo2Depth),
+      lfo(ParamId.Lfo3Target, ParamId.Lfo3Depth),
+      { name: round(ParamId.Sync) >= 1 ? "Sync" : "Osc2",
+        on: g(ParamId.Osc2Mix) > 0.02, off: () => this.set(ParamId.Osc2Mix, 0) },
+      { name: "Fold", on: g(ParamId.Fold) > 0.02, off: () => this.set(ParamId.Fold, 0) },
+      { name: OSC_MOD_TYPES[round(ParamId.OscModType)],
+        on: round(ParamId.OscModType) !== 0 && g(ParamId.OscModAmount) > 0.02,
+        off: () => this.set(ParamId.OscModType, 0) },
+      { name: "Comb", on: g(ParamId.CombMix) > 0.02, off: () => this.set(ParamId.CombMix, 0) },
+      { name: "Crush", on: round(ParamId.Crush) > 0, off: () => this.set(ParamId.Crush, 0) },
+      { name: "Downsmpl", on: round(ParamId.Downsample) > 0, off: () => this.set(ParamId.Downsample, 0) },
+      { name: "Drive", on: g(ParamId.Drive) > 0.05, off: () => this.set(ParamId.Drive, 0) },
+      { name: "Punch", on: g(ParamId.PitchEnvAmount) > 0.1, off: () => this.set(ParamId.PitchEnvAmount, 0) },
+      { name: "Echo", on: g(ParamId.EchoMix) > 0.03, off: () => this.set(ParamId.EchoMix, 0) },
+      { name: "Verb", on: g(ParamId.ReverbMix) > 0.05, off: () => this.set(ParamId.ReverbMix, 0) },
+    ];
+  }
+
+  /** Turn off a random subset of the active modules so only ~`sparsityBudget()` of
+      them stay on. Each disable happens with probability `randomness`, so a gentle
+      shuffle rarely strips a module while a full shuffle enforces the budget; at
+      randomness 0 (no-op shuffle) nothing is touched. */
+  private applySparsity(randomness: number): void {
+    if (randomness <= 0) return;
+    const active = this.soundModules().filter((m) => m.on);
+    const budget = sparsityBudget();
+    if (active.length <= budget) return;
+    // Fisher-Yates shuffle so the kept subset is unbiased.
+    for (let i = active.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [active[i], active[j]] = [active[j], active[i]];
+    }
+    let toDisable = active.length - budget;
+    for (let i = 0; i < active.length && toDisable > 0; i++) {
+      if (Math.random() < randomness) { active[i].off(); toDisable--; }
+    }
+  }
+
+  /** Short list of the main settings shaping the current sound, for the recap line:
+      wave, pitch, the noise colour (if noise is audible), every active module by
+      name, then the estimated length. e.g. ["Square","159","Pink","Ring","Comb","0.8s"]. */
+  describe(): string[] {
+    const tokens: string[] = [];
+    tokens.push(getParamSpec(this.drum, ParamId.Waveform).choices![Math.round(this.get(ParamId.Waveform))]);
+    tokens.push(String(Math.round(this.get(ParamId.Pitch))));
+    if (this.get(ParamId.NoiseLevel) > 0.05) tokens.push(NOISE_TYPES[Math.round(this.get(ParamId.NoiseType))]);
+    for (const m of this.soundModules()) if (m.on) tokens.push(m.name);
+    tokens.push(`${+this.estimateLength().toFixed(2)}s`);
+    return tokens;
   }
 
   /** Rough audible length (seconds) of the current sound: amp body (attack +

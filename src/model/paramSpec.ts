@@ -11,6 +11,17 @@ import { ParamId, NUM_PARAMS } from "./params";
 // disables the LFO, so shuffling its destination can leave 0-2 LFOs active.
 export const LFO_TARGETS = ["Pitch", "Filter", "Amp", "Drive", "Reso", "Wave", "None"];
 
+// Sound-verse expansion choice lists. The stored value is the index; the engine
+// maps each index to its DSP meaning, so these MUST stay in sync with the matching
+// arrays in public/worklet/engine.js.
+export const NOISE_TYPES = ["White", "Pink", "Brown", "Blue", "Violet", "Crackle", "Metal"];
+export const OSC_MOD_TYPES = ["Off", "FM", "Ring"];
+export const LFO_SHAPES = ["Sine", "Tri", "Saw", "Square", "S&H"];
+export const ON_OFF = ["Off", "On"];
+// Crush bit-depth per index (0 = off); Downsample factor per index (index 0 = 1x off).
+export const CRUSH_CHOICES = ["Off", "12-bit", "10-bit", "8-bit", "6-bit", "5-bit", "4-bit", "3-bit"];
+export const DOWNSAMPLE_CHOICES = ["Off", "2x", "3x", "4x", "6x", "8x", "12x", "16x"];
+
 export interface ParamSpec {
   name: string;
   min: number;
@@ -63,6 +74,26 @@ export function baseSpec(id: ParamId): ParamSpec {
     case ParamId.Lfo3Target:     return make("Dest", 0, 6, 2, 1, 1, "", true, LFO_TARGETS);
     case ParamId.Lfo3Rate:       return make("Rate", 0.1, 40, 5, 0.4, 0.1, "Hz");
     case ParamId.Lfo3Depth:      return make("Amt", 0, 1, 0, 1, 0.02, "");
+    // --- Sound-verse expansion. Defaults are all "off/neutral" so existing sounds
+    // are unchanged; choice lists must stay in sync with the maps in engine.js. ---
+    case ParamId.NoiseType:      return make("Noise Col", 0, 6, 0, 1, 1, "", true, NOISE_TYPES);
+    case ParamId.OscModType:     return make("Mod", 0, 2, 0, 1, 1, "", true, OSC_MOD_TYPES);
+    case ParamId.OscModRatio:    return make("Mod Ratio", 0.5, 12, 1, 0.5, 0.01, "x");
+    case ParamId.OscModAmount:   return make("Mod Amt", 0, 1, 0, 1, 0.02, "");
+    case ParamId.Crush:          return make("Crush", 0, 7, 0, 1, 1, "", true, CRUSH_CHOICES);
+    case ParamId.Downsample:     return make("Downsmpl", 0, 7, 0, 1, 1, "", true, DOWNSAMPLE_CHOICES);
+    case ParamId.Lfo1Shape:      return make("Shape", 0, 4, 0, 1, 1, "", true, LFO_SHAPES);
+    case ParamId.Lfo2Shape:      return make("Shape", 0, 4, 0, 1, 1, "", true, LFO_SHAPES);
+    case ParamId.Lfo3Shape:      return make("Shape", 0, 4, 0, 1, 1, "", true, LFO_SHAPES);
+    // 2nd oscillator + sync, wavefolder, and Karplus-Strong/comb resonator. All
+    // default to off/neutral so existing sounds are unchanged.
+    case ParamId.Osc2Mix:        return make("Osc2", 0, 1, 0, 1, 0.02, "");
+    case ParamId.Osc2Detune:     return make("Detune", -12, 12, 0, 1, 0.1, "st");
+    case ParamId.Sync:           return make("Sync", 0, 1, 0, 1, 1, "", true, ON_OFF);
+    case ParamId.Fold:           return make("Fold", 0, 1, 0, 1, 0.02, "");
+    case ParamId.CombMix:        return make("Comb", 0, 1, 0, 1, 0.02, "");
+    case ParamId.CombTune:       return make("Comb Tune", 0.25, 4, 1, 0.5, 0.01, "x");
+    case ParamId.CombDecay:      return make("Comb Decay", 0, 1, 0.5, 1, 0.02, "");
     default:                     return make("?", 0, 1, 0, 1, 0.01, "");
   }
 }

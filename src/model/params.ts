@@ -35,6 +35,26 @@ export enum ParamId {
   Lfo3Target,
   Lfo3Rate,
   Lfo3Depth,
+  // Sound-verse expansion (all appended, all back-compatible): a noise colour,
+  // a second-oscillator FM/ring modulator, a bitcrusher, and per-LFO waveshapes.
+  NoiseType,     // White / Pink / Brown / Blue / Violet / Crackle / Metal
+  OscModType,    // Off / FM / Ring (second-operator cross-modulation)
+  OscModRatio,   // modulator frequency as a ratio of the carrier
+  OscModAmount,  // FM index / ring-mod depth
+  Crush,         // bit-depth reduction (Off..3-bit)
+  Downsample,    // sample-rate reduction (Off..16x)
+  Lfo1Shape,     // Sine / Tri / Saw / Square / S&H, per LFO
+  Lfo2Shape,
+  Lfo3Shape,
+  // Second wave of expansion: a detuned 2nd oscillator (+ hard sync), a wavefolder,
+  // and a Karplus-Strong/comb resonator (plucked & struck physical-modeling tones).
+  Osc2Mix,       // level of the 2nd oscillator (0 = off)
+  Osc2Detune,    // 2nd-oscillator detune in semitones
+  Sync,          // hard-sync the 2nd oscillator to the 1st (Off/On)
+  Fold,          // wavefolder amount (0 = off)
+  CombMix,       // resonator dry/wet (0 = off)
+  CombTune,      // resonator pitch as a ratio of the note
+  CombDecay,     // resonator feedback: short pluck .. long ringing string
   NumParams,
 }
 
@@ -57,6 +77,14 @@ export function getParamGroup(id: ParamId): ParamGroup {
     case ParamId.Waveform:
     case ParamId.ToneLevel:
     case ParamId.NoiseLevel:
+    case ParamId.NoiseType:
+    case ParamId.OscModType:
+    case ParamId.OscModRatio:
+    case ParamId.OscModAmount:
+    case ParamId.Osc2Mix:
+    case ParamId.Osc2Detune:
+    case ParamId.Sync:
+    case ParamId.Fold:
       return ParamGroup.Tone;
     case ParamId.AmpAttack:
     case ParamId.AmpDecay:
@@ -66,6 +94,9 @@ export function getParamGroup(id: ParamId): ParamGroup {
     case ParamId.FilterType:
     case ParamId.FilterCutoff:
     case ParamId.FilterReso:
+    case ParamId.CombMix:
+    case ParamId.CombTune:
+    case ParamId.CombDecay:
       return ParamGroup.Filter;
     case ParamId.LfoTarget:
     case ParamId.LfoRate:
@@ -76,6 +107,9 @@ export function getParamGroup(id: ParamId): ParamGroup {
     case ParamId.Lfo3Target:
     case ParamId.Lfo3Rate:
     case ParamId.Lfo3Depth:
+    case ParamId.Lfo1Shape:
+    case ParamId.Lfo2Shape:
+    case ParamId.Lfo3Shape:
       return ParamGroup.Lfo;
     case ParamId.Drive:
     case ParamId.EchoTime:
@@ -83,6 +117,8 @@ export function getParamGroup(id: ParamId): ParamGroup {
     case ParamId.EchoMix:
     case ParamId.ReverbSize:
     case ParamId.ReverbMix:
+    case ParamId.Crush:
+    case ParamId.Downsample:
       return ParamGroup.Fx;
     case ParamId.Volume:
       return ParamGroup.Output;

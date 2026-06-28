@@ -11,7 +11,7 @@ import { DrumType } from "../model/drums";
 import {
   ParamId, ParamGroup, NUM_PARAMS, getParamGroup, getParamGroupName,
 } from "../model/params";
-import { getParamSpec, formatValue, isDiscrete, LFO_TARGETS } from "../model/paramSpec";
+import { getParamSpec, formatValue, isDiscrete } from "../model/paramSpec";
 import { FACTORY_PRESETS, Preset } from "../model/presets";
 import { burstConfetti } from "./confetti";
 
@@ -389,17 +389,11 @@ export class SoundView {
     return sec;
   }
 
-  // Compact description of the current sound: wave, pitch, the three LFO
-  // destinations, and the amp tail length. e.g. "Square-159-Drive-Filter-None-1s".
+  // Compact recap of the main settings shaping the current sound: wave, pitch, the
+  // noise colour, every active effect/filter/LFO by name, then the amp tail length.
+  // e.g. "Square · 159 · Pink · Ring · Comb · Filter · 0.8s".
   private shuffleSummary(): string {
-    const p = this.kit.get(this.drum);
-    const wave = getParamSpec(this.drum, ParamId.Waveform)
-      .choices![Math.round(p.get(ParamId.Waveform))];
-    const pitch = Math.round(p.get(ParamId.Pitch));
-    const lfos = [ParamId.LfoTarget, ParamId.Lfo2Target, ParamId.Lfo3Target]
-      .map((id) => LFO_TARGETS[Math.round(p.get(id))]);
-    const lenStr = `${+p.estimateLength().toFixed(2)}s`;
-    return [wave, pitch, ...lfos, lenStr].join("-");
+    return this.kit.get(this.drum).describe().join(" · ");
   }
 
   private category(g: ParamGroup): HTMLElement {
@@ -425,12 +419,18 @@ export class SoundView {
     return sec;
   }
 
-  // The 9 LFO params rendered as three labelled sub-sections (Dest + Rate + Amt each).
+  // The LFO params rendered as three labelled sub-sections (Dest + Shape + Rate +
+  // Amt each). Listed explicitly because Shape was appended at the param tail and
+  // so is not adjacent to its LFO's other params in index order.
   private lfoSections(): HTMLElement {
-    const ids = this.paramsInGroup(ParamGroup.Lfo); // [target,rate,depth] x3, in index order
+    const blocks: ParamId[][] = [
+      [ParamId.LfoTarget, ParamId.Lfo1Shape, ParamId.LfoRate, ParamId.LfoDepth],
+      [ParamId.Lfo2Target, ParamId.Lfo2Shape, ParamId.Lfo2Rate, ParamId.Lfo2Depth],
+      [ParamId.Lfo3Target, ParamId.Lfo3Shape, ParamId.Lfo3Rate, ParamId.Lfo3Depth],
+    ];
     const wrap = document.createElement("div");
     wrap.className = "lfo-sections";
-    for (let n = 0; n < 3; n++) {
+    blocks.forEach((ids, n) => {
       const block = document.createElement("div");
       block.className = "lfo-block";
       const h = document.createElement("div");
@@ -439,10 +439,10 @@ export class SoundView {
       block.append(h);
       const body = document.createElement("div");
       body.className = "cat-params";
-      for (let k = 0; k < 3; k++) body.append(this.valueBox(ids[n * 3 + k]));
+      for (const id of ids) body.append(this.valueBox(id));
       block.append(body);
       wrap.append(block);
-    }
+    });
     return wrap;
   }
 

@@ -8,8 +8,8 @@
     - Channel          <- DrumChannel.cpp / .h (6-voice pool + echo + freeverb + volume)
     - Reverb           <- juce::Reverb (freeverb: 8 combs + 4 allpass, mono)
 
-  The main thread owns parameter ranges/defaults; it sends plain 23-float
-  snapshots in. Parameter indices below MUST match src/model/params.ts (ParamId).
+  The main thread owns parameter ranges/defaults; it sends plain fixed-length
+  float snapshots in. Parameter indices below MUST match src/model/params.ts (ParamId).
 */
 
 // --- Parameter indices (keep in sync with ParamId in src/model/params.ts) ---
@@ -23,11 +23,38 @@ const P = {
   // LFO 2 & 3 (appended after Volume; see ParamId in src/model/params.ts).
   Lfo2Target: 23, Lfo2Rate: 24, Lfo2Depth: 25,
   Lfo3Target: 26, Lfo3Rate: 27, Lfo3Depth: 28,
+  // Sound-verse expansion (appended after the LFOs; see ParamId in src/model/params.ts).
+  NoiseType: 29, OscModType: 30, OscModRatio: 31, OscModAmount: 32,
+  Crush: 33, Downsample: 34,
+  Lfo1Shape: 35, Lfo2Shape: 36, Lfo3Shape: 37,
+  // 2nd oscillator + sync, wavefolder, Karplus-Strong/comb resonator.
+  Osc2Mix: 38, Osc2Detune: 39, Sync: 40, Fold: 41,
+  CombMix: 42, CombTune: 43, CombDecay: 44,
 };
 
 // LFO destination indices, in sync with LFO_TARGETS in src/model/paramSpec.ts.
 // LFO_NONE disables the LFO (handled by falling through the routing switch).
 const LFO_PITCH = 0, LFO_FILTER = 1, LFO_AMP = 2, LFO_DRIVE = 3, LFO_RESO = 4, LFO_WAVE = 5, LFO_NONE = 6;
+
+// Sound-verse expansion lookup tables — keep in sync with the choice lists in
+// src/model/paramSpec.ts (the stored param is the index into these).
+// Bit-depth per Crush index (0 = off); sample-rate divisor per Downsample index.
+const CRUSH_BITS = [0, 12, 10, 8, 6, 5, 4, 3];
+const DOWNSAMPLE_FACTOR = [1, 2, 3, 4, 6, 8, 12, 16];
+const FM_INDEX = 4;          // max phase-mod depth (carrier cycles) at OscModAmount = 1
+const CRACKLE_DENSITY = 0.03; // probability of a crackle/dust impulse per sample
+const METAL_HOLD = 9;        // sample-and-hold period (samples) for "Metal" noise
+const FOLD_GAIN = 4;         // extra pre-fold gain at Fold = 1 (more gain = more folds)
+const COMB_MAXLEN = 8192;    // resonator delay buffer (≈5Hz lowest tuned pitch at 44.1k)
+
+// One LFO sample for a given shape (0=Sine 1=Tri 2=Saw 3=Square) at phase∈[0,1).
+// Sample-and-hold (shape 4) is handled in the voice loop (it needs held state).
+function lfoWave(shape, phase) {
+  if (shape === 1) return 2 * Math.abs(2 * (phase - Math.floor(phase + 0.5))) - 1; // triangle
+  if (shape === 2) return 2 * phase - 1;                                            // saw (rising)
+  if (shape === 3) return phase < 0.5 ? 1 : -1;                                     // square
+  return Math.sin(TWO_PI * phase);                                                  // sine
+}
 
 const NUM_DRUMS = 12;
 const NUM_VOICES = 6;
@@ -143,6 +170,33 @@ class SVF {
 }
 
 //============================================================================
+// Karplus-Strong / tuned-comb resonator. A fractional-delay loop with a one-pole
+// lowpass in the feedback path: excite it with a noise/osc burst and it rings at
+// the tuned pitch — short feedback = a pluck, high feedback = a sustained string.
+class KarplusComb {
+  constructor() { this.buf = new Float32Array(COMB_MAXLEN); this.w = 0; this.lp = 0; }
+  reset() { this.buf.fill(0); this.w = 0; this.lp = 0; }
+  // delaySamples: fractional loop length (= sr / tuned-freq). feedback: 0..~1.
+  process(input, delaySamples, feedback) {
+    let d = delaySamples;
+    if (d < 2) d = 2; else if (d > COMB_MAXLEN - 2) d = COMB_MAXLEN - 2;
+    let rp = this.w - d;
+    while (rp < 0) rp += COMB_MAXLEN;
+    const i0 = rp | 0;
+    const frac = rp - i0;
+    const i1 = i0 + 1 >= COMB_MAXLEN ? 0 : i0 + 1;
+    const delayed = this.buf[i0] * (1 - frac) + this.buf[i1] * frac;
+    // Gentle loop damping keeps it musical (a touch darker each pass).
+    this.lp = this.lp + (delayed - this.lp) * 0.5;
+    // Soft-clip the stored sample so a high-Q tuned loop saturates (overdriven
+    // string) instead of building up unbounded under sustained excitation.
+    this.buf[this.w] = Math.tanh(input + this.lp * feedback);
+    if (++this.w >= COMB_MAXLEN) this.w = 0;
+    return delayed;
+  }
+}
+
+//============================================================================
 class Voice {
   constructor(sr) {
     this.sr = sr;
@@ -155,7 +209,22 @@ class Voice {
     this.lfoTargets = [0, 0, 0];
     this.lfoRates = [0, 0, 0];
     this.lfoDepths = [0, 0, 0];
+    this.lfoShapes = [0, 0, 0];
+    this.lfoSH = [0, 0, 0];     // sample-and-hold held value, per LFO
     this.gateSamples = 0; this.samplesPlayed = 0; this.noteOffSent = false;
+    // Noise-colour filter state (white needs none; the others are shaped from it).
+    this.noiseType = 0;
+    this.pinkState = new Float32Array(7);
+    this.brown = 0; this.prevWhite = 0; this.prevPink = 0;
+    this.metalHold = 0; this.metalCtr = 0;
+    // Second-operator (FM/ring) + crusher state.
+    this.modType = 0; this.modRatio = 1; this.modAmount = 0; this.modPhase = 0;
+    this.crushBits = 0; this.dsFactor = 1; this.dsCtr = 0; this.dsHold = 0;
+    // 2nd oscillator (+ hard sync), wavefolder, comb resonator.
+    this.osc2Mix = 0; this.osc2Ratio = 1; this.osc2Phase = 0; this.sync = false;
+    this.fold = 0;
+    this.combMix = 0; this.combRatio = 1; this.combFb = 0;
+    this.comb = new KarplusComb();
   }
   start(s, gate) {
     this.basePitch = s[P.Pitch];
@@ -171,8 +240,34 @@ class Voice {
     this.lfoTargets = [Math.round(s[P.LfoTarget]), Math.round(s[P.Lfo2Target]), Math.round(s[P.Lfo3Target])];
     this.lfoRates = [s[P.LfoRate], s[P.Lfo2Rate], s[P.Lfo3Rate]];
     this.lfoDepths = [s[P.LfoDepth], s[P.Lfo2Depth], s[P.Lfo3Depth]];
+    this.lfoShapes = [Math.round(s[P.Lfo1Shape]), Math.round(s[P.Lfo2Shape]), Math.round(s[P.Lfo3Shape])];
     this.lfoPhase = [0, 0, 0];
+    this.lfoSH = [this.rng(), this.rng(), this.rng()]; // seed S&H for the first cycle
     this.drive = s[P.Drive];
+
+    // --- Sound-verse expansion params ---
+    this.noiseType = Math.round(s[P.NoiseType]) | 0;
+    this.pinkState.fill(0); this.brown = 0; this.prevWhite = 0; this.prevPink = 0;
+    this.metalHold = 0; this.metalCtr = 0;
+    this.modType = Math.round(s[P.OscModType]) | 0;
+    this.modRatio = s[P.OscModRatio] > 0 ? s[P.OscModRatio] : 1;
+    this.modAmount = clamp(s[P.OscModAmount], 0, 1);
+    this.modPhase = 0;
+    const crushIdx = clamp(Math.round(s[P.Crush]) | 0, 0, CRUSH_BITS.length - 1);
+    const dsIdx = clamp(Math.round(s[P.Downsample]) | 0, 0, DOWNSAMPLE_FACTOR.length - 1);
+    this.crushBits = CRUSH_BITS[crushIdx];
+    this.dsFactor = DOWNSAMPLE_FACTOR[dsIdx];
+    this.dsCtr = 0; this.dsHold = 0;
+
+    this.osc2Mix = clamp(s[P.Osc2Mix], 0, 1);
+    this.osc2Ratio = Math.pow(2, s[P.Osc2Detune] / 12);
+    this.osc2Phase = 0;
+    this.sync = Math.round(s[P.Sync]) >= 1;
+    this.fold = clamp(s[P.Fold], 0, 1);
+    this.combMix = clamp(s[P.CombMix], 0, 1);
+    this.combRatio = s[P.CombTune] > 0 ? s[P.CombTune] : 1;
+    this.combFb = 0.85 + clamp(s[P.CombDecay], 0, 1) * 0.14; // 0.85 (pluck) .. 0.99 (string)
+    this.comb.reset();
 
     this.adsr.setParameters(
       Math.max(0.0001, s[P.AmpAttack]),
@@ -196,6 +291,40 @@ class Voice {
     if (wave === 2) return phase < pw ? 1 : -1;                                     // square
     return Math.sin(TWO_PI * phase);                                               // sine
   }
+  // One step of the Paul Kellet "refined" pink-noise filter (state in pinkState),
+  // returning a roughly -1..1 pink sample for the given white input.
+  pinkStep(white) {
+    const s = this.pinkState;
+    s[0] = 0.99886 * s[0] + white * 0.0555179;
+    s[1] = 0.99332 * s[1] + white * 0.0750759;
+    s[2] = 0.96900 * s[2] + white * 0.1538520;
+    s[3] = 0.86650 * s[3] + white * 0.3104856;
+    s[4] = 0.55000 * s[4] + white * 0.5329522;
+    s[5] = -0.7616 * s[5] - white * 0.0168980;
+    const pink = (s[0] + s[1] + s[2] + s[3] + s[4] + s[5] + s[6] + white * 0.5362) * 0.11;
+    s[6] = white * 0.115926;
+    return pink;
+  }
+  // One noise sample shaped to the selected colour. White is flat; the others tilt
+  // its spectrum (pink -3dB/oct, brown -6, blue +3, violet +6) or grain it
+  // (crackle = sparse impulses, metal = sample-and-hold decimation).
+  nextNoise() {
+    const white = this.rng();
+    switch (this.noiseType) {
+      case 1: return this.pinkStep(white);                          // pink
+      case 2: this.brown = clamp(this.brown + white * 0.02, -1, 1); // brown (leaky integral)
+              return this.brown;
+      case 3: { const pink = this.pinkStep(white);                  // blue (pink differentiated)
+                const blue = (pink - this.prevPink) * 2; this.prevPink = pink;
+                return clamp(blue, -1, 1); }
+      case 4: { const violet = (white - this.prevWhite) * 0.5;      // violet (white differentiated)
+                this.prevWhite = white; return violet; }
+      case 5: return Math.random() < CRACKLE_DENSITY ? white * 3 : 0; // crackle / dust
+      case 6: if (--this.metalCtr <= 0) { this.metalHold = white; this.metalCtr = METAL_HOLD; }
+              return this.metalHold;                                 // metal (S&H decimated)
+      default: return white;                                        // white
+    }
+  }
   renderAdding(out, n) {
     if (!this.active) return;
     const sr = this.sr;
@@ -205,9 +334,11 @@ class Voice {
       let pitchMul = 1, cutoffMul = 1, ampMul = 1, resoMul = 1, driveAdd = 0, pwOff = 0;
       for (let L = 0; L < 3; L++) {
         const depth = this.lfoDepths[L];
-        const v = Math.sin(TWO_PI * this.lfoPhase[L]); // -1..1
+        const shape = this.lfoShapes[L];
+        // S&H holds one random value per cycle; the others read the shaped wave.
+        const v = shape === 4 ? this.lfoSH[L] : lfoWave(shape, this.lfoPhase[L]); // -1..1
         this.lfoPhase[L] += this.lfoRates[L] / sr;     // advance even when silent
-        if (this.lfoPhase[L] >= 1) this.lfoPhase[L] -= 1;
+        if (this.lfoPhase[L] >= 1) { this.lfoPhase[L] -= 1; this.lfoSH[L] = this.rng(); }
         if (depth <= 0) continue;
         switch (this.lfoTargets[L]) {
           case LFO_PITCH:  pitchMul  *= Math.pow(2, v * depth * 0.5); break;
@@ -223,12 +354,50 @@ class Voice {
       let freq = this.basePitch * (1 + this.pitchEnvAmount * this.pitchEnv) * pitchMul;
       this.pitchEnv *= this.pitchEnvCoef;
 
-      const osc = this.osc(this.oscPhase, this.waveform, clamp(0.5 + pwOff, 0.05, 0.95));
-      const noise = this.rng();
-      const mixed = this.toneLevel * osc + this.noiseLevel * noise;
+      // Second operator: a sine modulator at `freq * ratio`, applied as either
+      // phase modulation (FM) or amplitude/ring modulation of the carrier.
+      let modOut = 0;
+      if (this.modType !== 0) {
+        modOut = Math.sin(TWO_PI * this.modPhase);
+        this.modPhase += (freq * this.modRatio) / sr;
+        if (this.modPhase >= 1) this.modPhase -= Math.floor(this.modPhase);
+      }
+      const pw = clamp(0.5 + pwOff, 0.05, 0.95);
+      let carrierPhase = this.oscPhase;
+      if (this.modType === 1) carrierPhase += modOut * this.modAmount * FM_INDEX; // FM
+      let osc = this.osc(carrierPhase - Math.floor(carrierPhase), this.waveform, pw);
+      if (this.modType === 2) osc *= 1 - this.modAmount + this.modAmount * modOut; // ring
+
+      // Detuned 2nd oscillator, blended in (hard-sync handled at the phase advance).
+      if (this.osc2Mix > 0) {
+        const o2 = this.osc(this.osc2Phase - Math.floor(this.osc2Phase), this.waveform, pw);
+        osc += o2 * this.osc2Mix;
+      }
+      // Wavefolder: drive the wave into a sine fold so it folds back on itself,
+      // adding harmonics (bypassed at 0 so the dry wave is untouched).
+      if (this.fold > 0) osc = Math.sin(osc * (1 + this.fold * FOLD_GAIN) * 1.5707963);
+
+      const noise = this.nextNoise();
+      let mixed = this.toneLevel * osc + this.noiseLevel * noise;
+
+      // Bit/sample-rate crush: decimate (sample-and-hold), then quantise to N bits.
+      if (this.dsFactor > 1) {
+        if (--this.dsCtr <= 0) { this.dsHold = mixed; this.dsCtr = this.dsFactor; }
+        mixed = this.dsHold;
+      }
+      if (this.crushBits > 0) {
+        const step = 2 / (1 << this.crushBits);
+        mixed = Math.round(mixed / step) * step;
+      }
 
       this.oscPhase += freq / sr;
-      if (this.oscPhase >= 1) this.oscPhase -= Math.floor(this.oscPhase);
+      let masterWrapped = false;
+      if (this.oscPhase >= 1) { this.oscPhase -= Math.floor(this.oscPhase); masterWrapped = true; }
+      if (this.osc2Mix > 0) {
+        this.osc2Phase += (freq * this.osc2Ratio) / sr;
+        if (this.osc2Phase >= 1) this.osc2Phase -= Math.floor(this.osc2Phase);
+        if (this.sync && masterWrapped) this.osc2Phase = 0; // hard sync to oscillator 1
+      }
 
       const cutoff = clamp(this.filterCutoff * cutoffMul, 20, nyquist * 0.99);
       const g = Math.tan(Math.PI * cutoff / sr);
@@ -237,6 +406,14 @@ class Voice {
 
       const drive = clamp(this.drive + driveAdd, 0, 2);
       if (drive > 0) filtered = Math.tanh(filtered * (1 + drive * 5));
+
+      // Karplus-Strong/comb resonator: excite the tuned loop with the dry signal and
+      // blend its ringing output back in. Tuned to the note's pitch × CombTune.
+      if (this.combMix > 0) {
+        const combFreq = clamp(freq * this.combRatio, 20, nyquist);
+        const ringing = this.comb.process(filtered, sr / combFreq, this.combFb);
+        filtered = filtered * (1 - this.combMix) + ringing * this.combMix;
+      }
 
       const env = this.adsr.next() * ampMul;
       out[i] += filtered * env * VOICE_GAIN;
