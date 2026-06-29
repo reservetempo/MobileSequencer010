@@ -286,11 +286,22 @@ button:active { transform: scale(0.97); }
 .saved-del:active { color: var(--text); }
 .saved-list .hint { padding: 8px 10px; }
 .saved-folder-head {
+  display: flex; align-items: center; gap: 6px;
   text-align: left; background: var(--panel); border: 1px solid var(--line);
   color: var(--text); border-radius: 8px; padding: 7px 10px;
   font-size: 12px; font-weight: 600; margin-top: 2px;
 }
 .saved-folder-head:active { background: var(--panel2); }
+.folder-toggle {
+  flex: 1; min-width: 0; text-align: left; padding: 0;
+  background: transparent; border: none; color: inherit;
+  font: inherit; font-weight: 600; font-size: 12px;
+}
+.folder-color {
+  flex: none; width: 18px; height: 18px; padding: 0; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+}
+.folder-colors { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; padding: 6px 2px; }
 .saved-item.in-folder { margin-left: 10px; }
 .saved-move {
   flex: none; max-width: 92px; font: inherit; font-size: 11px;
@@ -367,6 +378,31 @@ button:active { transform: scale(0.97); }
   50% { background-position: 100% 50%; box-shadow: 0 4px 20px rgba(0, 255, 200, 0.6); }
 }
 @media (prefers-reduced-motion: reduce) { .shuffle-btn { animation: none; } }
+
+/* redesigned Sounds landing: shuffle section, JSON box, "Get in the weeds" toggle */
+.shuffle-section { display: flex; flex-direction: column; gap: 12px; }
+/* the big primary Shuffle button on top — twice the size of the old one */
+.shuffle-big {
+  width: 100%; color: #0b0c0f; font-weight: 800; font-size: 22px; letter-spacing: 0.3px;
+  padding: 20px 18px; border: none; border-radius: 14px; cursor: pointer;
+  background: linear-gradient(135deg, #6c5cff, #00ffc8);
+  background-size: 180% 180%;
+  box-shadow: 0 4px 18px rgba(108, 92, 255, 0.45);
+  animation: shuffle-glow 2.6s ease-in-out infinite;
+}
+.shuffle-big:active { transform: scale(0.97); }
+@media (prefers-reduced-motion: reduce) { .shuffle-big { animation: none; } }
+.preset-name-btn { font-weight: 700; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.weeds-btn { width: 100%; padding: 11px; font-size: 14px; font-weight: 600; }
+.json-box .cat-head { margin-bottom: 8px; }
+.json-copy { padding: 4px 10px; font-size: 12px; }
+.json-pre {
+  margin: 0; max-height: 220px; overflow: auto;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px; line-height: 1.45; color: var(--text);
+  white-space: pre; user-select: text; -webkit-user-select: text;
+}
 .lfo-sections { display: flex; flex-direction: column; gap: 10px; }
 .lfo-block { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .lfo-head { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
@@ -381,6 +417,55 @@ button:active { transform: scale(0.97); }
   display: flex; align-items: center; justify-content: center; gap: 8px;
   font-weight: 600; font-size: 14px; background: var(--panel2);
 }
+.steps-actions { display: flex; gap: 8px; }
+.steps-actions .mixer-open-btn { width: auto; flex: 1; }
+
+/* key targeting: highlighted sounds get pitched by the row while the key is on */
+.drum-pad.keyed { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.lane-key {
+  position: absolute; top: -7px; left: -7px;
+  width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel2); border: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; line-height: 1;
+}
+.lane-key.on { background: var(--accent); color: #0b0c0f; border-color: transparent; }
+
+/* preset rhythms modal */
+.rhythm-overlay {
+  position: fixed; inset: 0; z-index: 50; padding: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.rhythm-modal {
+  width: 100%; max-width: 420px; max-height: 80vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px; padding: 12px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 14px;
+}
+.rhythm-head { display: flex; align-items: center; gap: 8px; }
+.rhythm-back { flex: none; background: transparent; border: none; color: var(--muted); font-size: 20px; padding: 0 4px; }
+.rhythm-title { flex: 1; font-weight: 600; font-size: 16px; }
+.rhythm-close {
+  flex: none; width: 30px; font-size: 16px; border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+}
+.rhythm-list { display: flex; flex-direction: column; gap: 6px; }
+.rhythm-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  text-align: left; padding: 10px 12px; background: var(--panel);
+}
+.rhythm-name { font-weight: 600; font-size: 14px; }
+.rhythm-genre { font-size: 11px; color: var(--muted); }
+.rhythm-assign { display: flex; flex-direction: column; gap: 8px; }
+.rhythm-track { display: flex; align-items: center; gap: 10px; }
+.rhythm-track-name { flex: none; width: 108px; font-size: 13px; }
+.rhythm-pick { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.rhythm-pick.has-sound { justify-content: flex-start; }
+.rhythm-apply {
+  width: 100%; padding: 12px; border: none; border-radius: 10px;
+  font-weight: 700; color: #0b0c0f; background: linear-gradient(135deg, #6c5cff, #00ffc8);
+}
+.rhythm-modal .sound-picker { position: static; max-width: none; max-height: 50vh; }
 .mixer-head { display: flex; align-items: center; gap: 12px; }
 .mixer-back { background: transparent; border: none; color: var(--muted); padding: 6px 4px; font-size: 15px; }
 .mixer-back:active { color: var(--text); }

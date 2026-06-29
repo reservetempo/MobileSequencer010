@@ -56,7 +56,8 @@ function lfoWave(shape, phase) {
   return Math.sin(TWO_PI * phase);                                                  // sine
 }
 
-const NUM_DRUMS = 12;
+const NUM_DRUMS = 32; // physical channel POOL; sounds are bound to channels on demand
+const AUDITION = -2;  // reserved sound id for one-shot previews (editor + lane), reuses 1 channel
 const NUM_VOICES = 6;
 const VOICE_GAIN = 0.9;
 const TWO_PI = Math.PI * 2;
@@ -444,6 +445,7 @@ class Echo {
     this.w = (this.w + 1) % this.bufLen;
     return input * (1 - mix) + delayed * mix;
   }
+  clear() { this.buf.fill(0); this.w = 0; }
 }
 
 //============================================================================
@@ -511,8 +513,19 @@ class Channel {
     // so a pitched melody hit can't clobber the drum's base sound. Mirrors how
     // the C++ engine reads kit.params live while triggering from a snapshot.
     this.params = null;
+    // Dynamic allocation: which sound this channel is currently bound to (-1 = free)
+    // and the sample-clock time until which it's considered still ringing (its tail),
+    // used to choose which channel to steal. See EngineProcessor.allocate.
+    this.soundId = -1;
+    this.busyUntil = 0;
   }
   setParams(snap) { this.params = snap; }
+  hasActiveVoices() {
+    for (let i = 0; i < NUM_VOICES; i++) if (this.voices[i].active) return true;
+    return false;
+  }
+  resetFx() { this.echo.clear(); this.reverb.reset(); }
+  killVoices() { for (let i = 0; i < NUM_VOICES; i++) this.voices[i].active = false; }
   trigger(snap, gate) {
     for (let i = 0; i < NUM_VOICES; i++) {
       if (!this.voices[i].active) { this.voices[i].start(snap, gate); return; }
@@ -553,8 +566,12 @@ class EngineProcessor extends AudioWorkletProcessor {
     this.scratch = new Float32Array(128);
     this.master = new Float32Array(128);
 
-    // Pitch ranges per drum index ([lo, hi]); sent from the main thread.
-    this.pitchRanges = new Array(NUM_DRUMS).fill(null);
+    // --- dynamic sound allocation ---
+    // Sound table: id -> { snap (base FX/pitch), lo, hi (pitch range), tail (ring secs) }.
+    // Grid cells reference these ids; the engine binds each to a pool channel on demand.
+    this.sounds = new Map();
+    this.soundToChannel = new Map(); // id -> channel index currently bound to it
+    this.clock = 0; // running sample counter, for busyUntil/steal decisions
 
     // --- pattern + transport state ---
     // Active pattern the loop is currently playing.
@@ -579,9 +596,15 @@ class EngineProcessor extends AudioWorkletProcessor {
 
   onMessage(m) {
     switch (m.type) {
-      case "trigger": { const ch = this.channels[m.drum]; if (ch) ch.trigger(m.snapshot, m.gate | 0); break; }
-      case "params": { const ch = this.channels[m.drum]; if (ch) ch.setParams(m.snapshot); break; }
-      case "pitchRanges": this.pitchRanges = m.ranges; break;
+      case "setSounds": {
+        // Replace the sound table with the painted lanes (id + base snapshot + range + tail).
+        this.sounds.clear();
+        for (const s of m.sounds) this.sounds.set(s.id, { snap: s.snap, lo: s.lo, hi: s.hi, tail: s.tail });
+        break;
+      }
+      case "audition": // one-shot preview now (editor / lane), on the reserved channel
+        this.triggerSound(AUDITION, m.snapshot, m.snapshot, m.gate | 0, m.tail);
+        break;
       case "pattern":
         if (this.playing) {
           // Stage; applied at the next loop restart.
@@ -631,6 +654,42 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
   }
 
+  // Pick a pool channel for sound `id`: reuse its current binding, else a free
+  // channel, else STEAL the most-idle one (no active voices + earliest busyUntil),
+  // which protects sounds still ringing out (large busyUntil) — the longer a sound's
+  // tail, the later it's stolen. Returns the channel index, bound to `id`.
+  allocate(id) {
+    const cur = this.soundToChannel.get(id);
+    if (cur !== undefined && this.channels[cur].soundId === id) return cur;
+
+    let best = -1, bestScore = Infinity;
+    for (let c = 0; c < NUM_DRUMS; c++) {
+      const ch = this.channels[c];
+      if (ch.soundId === -1) { best = c; break; } // truly free -> take it
+      const score = (ch.hasActiveVoices() ? 1e15 : 0) + ch.busyUntil;
+      if (score < bestScore) { bestScore = score; best = c; }
+    }
+    const ch = this.channels[best];
+    if (ch.soundId !== id) {
+      if (ch.soundId !== -1) this.soundToChannel.delete(ch.soundId);
+      if (ch.hasActiveVoices()) ch.killVoices(); // forced steal of a live channel (rare)
+      ch.resetFx();                              // don't bleed the old sound's tail
+      ch.soundId = id;
+    }
+    this.soundToChannel.set(id, best);
+    return best;
+  }
+
+  // Trigger sound `id`: bind/steal a channel, load its FX params, mark it busy for the
+  // estimated tail, and start a voice with the (possibly key-pitched) snapshot.
+  triggerSound(id, baseSnap, voiceSnap, gate, tailSec) {
+    const c = this.allocate(id);
+    const ch = this.channels[c];
+    ch.setParams(baseSnap);
+    ch.busyUntil = this.clock + gate + Math.max(0, tailSec || 0) * this.sr;
+    ch.trigger(voiceSnap, gate);
+  }
+
   // Fire one step of the ordered sequence: walk the 20-slot order list, play each
   // referenced pattern's 16 columns, looping. Each painted row triggers pitched to
   // its grid's key. Staged edits are promoted only at the loop boundary.
@@ -654,20 +713,25 @@ class EngineProcessor extends AudioWorkletProcessor {
     const col = this.seqPos % NUM_STEPS;
     const g = blocks[entry.grid];
 
+    // Key targeting: when the block's key is on, only the sounds in keyedDrums get
+    // pitched to the row's note; everything else plays as-is. A missing list (older
+    // patterns) means "all", preserving the old all-rows-keyed behaviour.
+    const keyedSet = Array.isArray(g.keyedDrums) ? new Set(g.keyedDrums) : null;
+
     const fired = [];
     for (let row = 0; row < NUM_ROWS; row++) {
-      const drum = g.cells[row * NUM_STEPS + col];
-      if (drum < 0 || drum >= NUM_DRUMS) continue;
-      const ch = this.channels[drum];
-      if (!ch || !ch.params) continue;
+      const id = g.cells[row * NUM_STEPS + col]; // cell = stable sound id
+      if (id < 0) continue;
+      const snd = this.sounds.get(id);
+      if (!snd) continue; // sound was removed -> skip (no empty-channel trigger)
 
-      const snap = ch.params.slice(); // base sound...
-      const range = this.pitchRanges[drum];
-      // ...pitched to the row's note, unless this grid has its key turned off,
-      // in which case every row plays the saved sound as-is (no pitch change).
-      if (range && g.keyEnabled !== false) snap[P.Pitch] = frequencyFor(row, g.root, g.scale, range[0], range[1]);
-      ch.trigger(snap, gate);
-      fired.push(drum);
+      const voiceSnap = snd.snap.slice();
+      // ...pitched to the row's note when the key is on AND this sound is targeted.
+      if (g.keyEnabled !== false && (keyedSet === null || keyedSet.has(id))) {
+        voiceSnap[P.Pitch] = frequencyFor(row, g.root, g.scale, snd.lo, snd.hi);
+      }
+      this.triggerSound(id, snd.snap, voiceSnap, gate, snd.tail);
+      fired.push(id);
     }
 
     this.reportPlayhead(entry.grid, col, entry.slot, fired);
@@ -690,6 +754,7 @@ class EngineProcessor extends AudioWorkletProcessor {
     }
     const master = this.master;
     for (let i = 0; i < n; i++) master[i] = 0;
+    this.clock += n; // sample clock for allocation/steal decisions
 
     if (!this.playing) {
       this.renderChannels(master, 0, n); // audition / tails keep ringing

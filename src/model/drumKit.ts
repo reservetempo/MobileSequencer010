@@ -69,6 +69,26 @@ function echoRepeats(fb: number, mix: number): number {
   return Math.max(1, 1 + Math.log(ECHO_EPS / mix) / Math.log(fb));
 }
 
+/** Rough audible length (seconds) of a sound from its parameter snapshot: the amp
+    body (attack + decay + sustain-weighted release) plus the dominant FX tail
+    (echo/reverb). Used for the shuffle recap, the length cap, and the engine's
+    channel-stealing "tail" (so long-ringing sounds keep their channel). */
+export function estimateLength(snap: number[]): number {
+  const body =
+    snap[ParamId.AmpAttack] +
+    snap[ParamId.AmpDecay] +
+    snap[ParamId.AmpSustain] * snap[ParamId.AmpRelease];
+  const echoTail =
+    snap[ParamId.EchoMix] > ECHO_EPS
+      ? snap[ParamId.EchoTime] * echoRepeats(snap[ParamId.EchoFeedback], snap[ParamId.EchoMix])
+      : 0;
+  const verbTail =
+    snap[ParamId.ReverbMix] > VERB_EPS
+      ? RV_BASE + snap[ParamId.ReverbSize] * RV_SPAN
+      : 0;
+  return body + Math.max(echoTail, verbTail);
+}
+
 // Draw a frequency in [lo, hi] (both > 0) shaped by `curve`. Log/Gaussian options
 // work in normalised log-position p∈[0,1] and map back with lo·(hi/lo)^p.
 export function sampleFreq(curve: FreqCurve, lo: number, hi: number): number {
@@ -113,6 +133,7 @@ export class DrumParameters {
   loOf(id: ParamId): number { return this.lo[id]; }
   hiOf(id: ParamId): number { return this.hi[id]; }
   presetName(): string { return this.preset.name; }
+  presetColor(): string { return this.preset.color; }
 
   /** Apply a preset: set the shuffle window AND the values it carries. */
   applyPreset(p: Preset): void {
@@ -316,24 +337,10 @@ export class DrumParameters {
     return tokens;
   }
 
-  /** Rough audible length (seconds) of the current sound: amp body (attack +
-      decay + sustain-weighted release) plus the dominant FX tail (echo/reverb).
-      Shared by the length cap and the shuffle recap label. */
+  /** Rough audible length (seconds) of the current sound. Delegates to the standalone
+      {@link estimateLength} so raw lane snapshots can compute the same tail. */
   estimateLength(): number {
-    const body =
-      this.get(ParamId.AmpAttack) +
-      this.get(ParamId.AmpDecay) +
-      this.get(ParamId.AmpSustain) * this.get(ParamId.AmpRelease);
-    const echoTail =
-      this.get(ParamId.EchoMix) > ECHO_EPS
-        ? this.get(ParamId.EchoTime) *
-          echoRepeats(this.get(ParamId.EchoFeedback), this.get(ParamId.EchoMix))
-        : 0;
-    const verbTail =
-      this.get(ParamId.ReverbMix) > VERB_EPS
-        ? RV_BASE + this.get(ParamId.ReverbSize) * RV_SPAN
-        : 0;
-    return body + Math.max(echoTail, verbTail);
+    return estimateLength(this.values);
   }
 
   /** Trim FX (echo, then reverb), and finally the amp body, so the estimated

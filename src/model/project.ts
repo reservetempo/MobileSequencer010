@@ -5,9 +5,11 @@ import { DrumType } from "./drums";
 import { DrumKit } from "./drumKit";
 import { WipArrangement, NUM_BLOCKS, NUM_ROWS, NUM_STEPS, ORDER_SLOTS, EMPTY } from "./melodyGrid";
 
-// A Steps-view paint lane: a saved sound on its own channel (see app.ts Lane).
+// A Steps-view paint lane: a saved sound with a stable id grid cells reference
+// (see app.ts Lane). Pre-v5 saves stored this id under `drum` (it was the channel).
 export interface LaneJSON {
-  drum: number; // the lane's engine channel
+  soundId: number; // stable sound id (v5+)
+  drum?: number; // legacy id field (pre-v5) — read into soundId on load
   name: string;
   snapshot: number[];
   color?: string; // absent in older saves
@@ -17,20 +19,26 @@ export interface LaneJSON {
 }
 
 export interface ProjectJSON {
-  version: 3;
+  version: 3 | 4 | 5;
   tempo: number;
-  blocks: { cells: number[]; root: number; scale: number; keyEnabled?: boolean }[];
+  blocks: { cells: number[]; root: number; scale: number; keyEnabled?: boolean; keyedDrums?: number[] }[];
   order: number[];
   drums: Record<number, number[]>; // drum type -> param snapshot
   // drum type -> live shuffle window (v3+); absent saves fall back to factory ranges.
   ranges?: Record<number, { lo: number[]; hi: number[] }>;
   presets?: Record<number, string>; // drum type -> active preset name (label/Reset target)
   soundName?: string; // name of the current sound being designed in the Sounds view
-  lanes?: LaneJSON[]; // optional: absent in older saves
+  lanesPerBlock?: LaneJSON[][]; // v4: one paint-lane list per grid
+  lanes?: LaneJSON[]; // v1-v3: a single global lane list (migrated into block 0)
 }
 
+const cloneLane = (l: LaneJSON): LaneJSON => ({
+  soundId: l.soundId, name: l.name, snapshot: l.snapshot.slice(), color: l.color, pitch: l.pitch,
+  mute: l.mute, solo: l.solo,
+});
+
 export function serialize(
-  arr: WipArrangement, kit: DrumKit, tempo: number, drums: DrumType[], lanes: LaneJSON[],
+  arr: WipArrangement, kit: DrumKit, tempo: number, drums: DrumType[], lanesPerBlock: LaneJSON[][],
   soundName: string
 ): ProjectJSON {
   const drumSnaps: Record<number, number[]> = {};
@@ -42,7 +50,7 @@ export function serialize(
     drumPresets[d] = kit.get(d).presetName();
   }
   return {
-    version: 3,
+    version: 5,
     tempo,
     blocks: arr.blocksMessage(),
     order: arr.orderArray(),
@@ -50,34 +58,41 @@ export function serialize(
     ranges: drumRanges,
     presets: drumPresets,
     soundName,
-    lanes: lanes.map((l) => ({
-      drum: l.drum, name: l.name, snapshot: l.snapshot.slice(), color: l.color, pitch: l.pitch,
-      mute: l.mute, solo: l.solo,
-    })),
+    lanesPerBlock: lanesPerBlock.map((list) => list.map(cloneLane)),
   };
 }
 
-/** Apply a loaded project into the live arrangement + kit, repopulating `lanes`
-    in place. Returns the tempo. */
-export function deserialize(
-  json: ProjectJSON, arr: WipArrangement, kit: DrumKit, drums: DrumType[], lanes: LaneJSON[]
-): number {
-  lanes.length = 0;
-  const v = json && (json as { version: number }).version;
-  if (!json || (v !== 1 && v !== 2 && v !== 3)) return 120;
+const normLane = (l: LaneJSON): LaneJSON => {
+  const pitchVal = l.snapshot[0] ?? 200; // ParamId.Pitch = 0
+  return {
+    soundId: l.soundId ?? l.drum ?? 0, // pre-v5 stored the id under `drum`
+    name: String(l.name ?? ""),
+    snapshot: l.snapshot.slice(),
+    color: l.color ?? "#888888",
+    pitch: Array.isArray(l.pitch) && l.pitch.length === 2 ? [l.pitch[0], l.pitch[1]] : [pitchVal * 0.5, pitchVal * 2],
+    mute: !!l.mute,
+    solo: !!l.solo,
+  };
+};
 
-  for (const l of json.lanes ?? []) {
-    if (l && Array.isArray(l.snapshot)) {
-      const pitchVal = l.snapshot[0] ?? 200; // ParamId.Pitch = 0
-      lanes.push({
-        drum: l.drum,
-        name: String(l.name ?? ""),
-        snapshot: l.snapshot.slice(),
-        color: l.color ?? "#888888",
-        pitch: Array.isArray(l.pitch) && l.pitch.length === 2 ? [l.pitch[0], l.pitch[1]] : [pitchVal * 0.5, pitchVal * 2],
-        mute: !!l.mute,
-        solo: !!l.solo,
-      });
+/** Apply a loaded project into the live arrangement + kit, repopulating
+    `lanesPerBlock` in place (one list per grid). Returns the tempo. */
+export function deserialize(
+  json: ProjectJSON, arr: WipArrangement, kit: DrumKit, drums: DrumType[], lanesPerBlock: LaneJSON[][]
+): number {
+  for (const list of lanesPerBlock) list.length = 0;
+  const v = json && (json as { version: number }).version;
+  if (!json || (v !== 1 && v !== 2 && v !== 3 && v !== 4 && v !== 5)) return 120;
+
+  // v4+: a lane list per grid. v1-v3: one global list -> migrate into block 0.
+  if (json.lanesPerBlock) {
+    json.lanesPerBlock.forEach((list, b) => {
+      if (b >= NUM_BLOCKS) return;
+      for (const l of list ?? []) if (l && Array.isArray(l.snapshot)) lanesPerBlock[b].push(normLane(l));
+    });
+  } else {
+    for (const l of json.lanes ?? []) {
+      if (l && Array.isArray(l.snapshot)) lanesPerBlock[0].push(normLane(l));
     }
   }
 
@@ -91,6 +106,17 @@ export function deserialize(
     dst.root = ((src.root % 12) + 12) % 12;
     dst.scale = src.scale ?? 0;
     dst.keyEnabled = src.keyEnabled !== false; // older saves had no key toggle -> on
+    // Key targeting: use the saved set if present; otherwise (older saves) seed it
+    // with every channel painted in this block, preserving the all-rows-keyed default.
+    dst.keyedDrums.clear();
+    if (Array.isArray(src.keyedDrums)) {
+      for (const d of src.keyedDrums) dst.keyedDrums.add(d);
+    } else {
+      for (let i = 0; i < NUM_ROWS * NUM_STEPS; i++) {
+        const d = dst.cells[i];
+        if (d >= 0) dst.keyedDrums.add(d);
+      }
+    }
   }
 
   for (let i = 0; i < ORDER_SLOTS; i++) {

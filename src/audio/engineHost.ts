@@ -6,7 +6,17 @@ export interface Playhead {
   grid: number; // -1 when stopped / nothing playing
   col: number;
   slot: number; // index in the order list (-1 when stopped)
-  fired: number[]; // drum channels triggered on this step (for the mixer flash)
+  fired: number[]; // sound ids triggered on this step (for the mixer flash)
+}
+
+// One entry in the engine's sound table: a painted sound bound to a pool channel on
+// demand. `id` is the stable sound id grid cells reference; `tail` is its ring length.
+export interface EngineSound {
+  id: number;
+  snap: number[];
+  lo: number; // Pitch range low (for the key/scale mapping)
+  hi: number; // Pitch range high
+  tail: number; // estimated audible length, seconds
 }
 
 export class EngineHost {
@@ -50,19 +60,16 @@ export class EngineHost {
     await this.ctx?.resume();
   }
 
-  /** Fire one drum hit now. `gate` is the note hold length in samples. */
-  trigger(drum: number, snapshot: number[], gate: number): void {
-    this.node?.port.postMessage({ type: "trigger", drum, snapshot, gate });
+  /** Replace the sound table (every painted sound across all grids). The engine binds
+      each id to a pool channel on demand and steals idle channels under pressure. */
+  setSounds(sounds: EngineSound[]): void {
+    this.node?.port.postMessage({ type: "setSounds", sounds });
   }
 
-  /** Update a drum's live params (drives echo/reverb/volume + pitch base). */
-  setParams(drum: number, snapshot: number[]): void {
-    this.node?.port.postMessage({ type: "params", drum, snapshot });
-  }
-
-  /** Per-drum Pitch ranges ([lo, hi] by drum index) for the scale mapping. */
-  setPitchRanges(ranges: (number[] | null)[]): void {
-    this.node?.port.postMessage({ type: "pitchRanges", ranges });
+  /** Preview a sound once now (editor voice or a lane), on the reserved audition
+      channel. `gate` is the hold length in samples; `tail` its estimated ring. */
+  audition(snapshot: number[], gate: number, tail: number): void {
+    this.node?.port.postMessage({ type: "audition", snapshot, gate, tail });
   }
 
   /** Replace the pattern (6 grids + 20-slot order). Resend on any edit; while

@@ -25,6 +25,19 @@ export class MelodyGrid {
   // saved sound as-is (no key/pitch change). Root/scale are ignored while off.
   // Defaults off: new patterns play sounds as-is until you turn the key on.
   keyEnabled = false;
+  // Which sound channels the key applies to while it's on (key targeting). A cell
+  // whose channel isn't in here plays as-is even with the key on. Populated when the
+  // key is turned on (seeded with the grid's current sounds) and toggled per sound.
+  readonly keyedDrums = new Set<number>();
+
+  isKeyed(drum: number): boolean {
+    return this.keyedDrums.has(drum);
+  }
+
+  toggleKeyed(drum: number): void {
+    if (this.keyedDrums.has(drum)) this.keyedDrums.delete(drum);
+    else this.keyedDrums.add(drum);
+  }
 
   private idx(row: number, step: number): number {
     return row * NUM_STEPS + step;
@@ -57,6 +70,7 @@ export interface BlockMessage {
   root: number;
   scale: number;
   keyEnabled: boolean;
+  keyedDrums: number[]; // channels the key targets (see MelodyGrid.keyedDrums)
 }
 
 export class WipArrangement {
@@ -76,6 +90,7 @@ export class WipArrangement {
       root: g.root,
       scale: g.scale,
       keyEnabled: g.keyEnabled,
+      keyedDrums: [...g.keyedDrums],
     }));
   }
 

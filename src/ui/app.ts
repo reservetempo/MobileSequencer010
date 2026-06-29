@@ -6,24 +6,24 @@
 
 import { EngineHost, Playhead } from "../audio/engineHost";
 import { DRUMS, DrumType, drumColour } from "../model/drums";
-import { getParamSpec } from "../model/paramSpec";
 import { ParamId } from "../model/params";
-import { DrumKit } from "../model/drumKit";
+import { DrumKit, estimateLength } from "../model/drumKit";
 import { FULL_RANGE_PRESET } from "../model/presets";
 import { SoundLibrary, SavedSound } from "../model/soundLibrary";
 import { serialize, deserialize, ProjectJSON } from "../model/project";
 import {
-  WipArrangement, NUM_BLOCKS, ORDER_SLOTS, EMPTY, GRID_COLORS,
+  WipArrangement, NUM_BLOCKS, NUM_ROWS, NUM_STEPS, ORDER_SLOTS, EMPTY, GRID_COLORS,
 } from "../model/melodyGrid";
 import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
+import { RHYTHMS, Rhythm } from "../model/rhythms";
 import { GridView } from "./gridView";
 import { SoundView } from "./soundView";
 
-// A paint lane added from the saved-sound library. Each lane gets its OWN engine
-// channel (`drum`) so several saved sounds can play at once, plus its own identity
-// colour and the Pitch range it maps melodies within.
+// A paint lane added from the saved-sound library. Each lane has a stable `soundId`
+// (what grid cells reference); the engine binds ids to physical channels on demand
+// (see engine.js allocate). Plus its own identity colour and Pitch range.
 interface Lane {
-  drum: number; // unique engine channel (0-11) this lane plays on
+  soundId: number; // stable id grid cells point at (engine maps it to a channel)
   name: string;
   snapshot: number[];
   color: string;
@@ -45,7 +45,7 @@ export class App {
   private drumTypes = DRUMS.map((d) => d.type);
   private saveTimer = 0;
 
-  private view: View = "grid";
+  private view: View = "sound"; // Sounds is the landing view
   private selectedDrum: DrumType = DrumType.Kick; // voice edited in the Sounds view
   private soundName = ""; // last used sound name (prefills the Save dialog)
   private workspace = 0; // 0..5 = pattern index, ORDER_VIEW = loop/order list
@@ -53,10 +53,12 @@ export class App {
   private playing = false;
   private tempo = 120;
 
-  // Paint lanes shown under the Steps grid. Empty by default; the + button adds
-  // saved sounds. activeLane indexes into this list (-1 = nothing to paint).
-  private lanes: Lane[] = [];
-  private activeLane = -1;
+  // Paint lanes per grid: each numbered grid has its OWN sounds. The + button adds
+  // saved sounds to the current grid. allLanes() spans every grid (engine pushes +
+  // channel allocation); `lanes`/`activeLane` below address the current grid.
+  private lanesPerBlock: Lane[][] = Array.from({ length: NUM_BLOCKS }, () => []);
+  private activeLanePerBlock: number[] = new Array(NUM_BLOCKS).fill(-1);
+  private nextSoundId = 0; // monotonic id for new lanes (cells reference these)
 
   private root: HTMLElement;
   private viewRoot!: HTMLElement;
@@ -96,47 +98,31 @@ export class App {
 
   // --- engine sync ------------------------------------------------------
   private pushAll(): void {
-    // The editor voice (selectedDrum) + every lane on its own channel.
-    this.engine.setParams(this.selectedDrum, this.kit.get(this.selectedDrum).capture());
-    this.pushLanes();
-    this.pushPitchRanges();
+    this.pushSounds();
     this.syncPattern();
     this.engine.setTempo(this.tempo);
   }
 
-  /** Push each lane's snapshot to its own engine channel (mute/solo applied). */
-  private pushLanes(): void {
-    for (const lane of this.lanes) this.pushLane(lane);
+  /** Replace the engine's sound table with every painted lane: stable id + snapshot +
+      Pitch range (for the key mapping) + estimated tail (for channel stealing).
+      Muted / soloed-out lanes get Volume zeroed. The engine binds ids to channels. */
+  private pushSounds(): void {
+    const sounds = this.allLanes().map((lane) => {
+      const snap = lane.snapshot.slice();
+      if (!this.laneAudible(lane)) snap[ParamId.Volume] = 0;
+      return { id: lane.soundId, snap, lo: lane.pitch[0], hi: lane.pitch[1], tail: estimateLength(snap) };
+    });
+    this.engine.setSounds(sounds);
   }
 
   /** True while at least one lane is soloed (so the rest are silenced). */
   private anySolo(): boolean {
-    return this.lanes.some((l) => l.solo);
+    return this.allLanes().some((l) => l.solo);
   }
 
   /** A lane is heard unless it's muted or another lane has stolen solo. */
   private laneAudible(lane: Lane): boolean {
     return !lane.mute && (!this.anySolo() || !!lane.solo);
-  }
-
-  /** Push one lane's params, zeroing Volume when it's muted/soloed out. */
-  private pushLane(lane: Lane): void {
-    const snap = lane.snapshot.slice();
-    if (!this.laneAudible(lane)) snap[ParamId.Volume] = 0;
-    this.engine.setParams(lane.drum, snap);
-  }
-
-  /** Send Pitch ranges for the melody mapping: the editor voice + each lane use
-      their live range; unused channels fall back to the static per-drum spec. */
-  private pushPitchRanges(): void {
-    const ranges: (number[] | null)[] = [];
-    for (let i = 0; i < 12; i++) {
-      const sp = getParamSpec(i as DrumType, ParamId.Pitch);
-      ranges[i] = [sp.min, sp.max];
-    }
-    ranges[this.selectedDrum] = this.kit.pitchRange(this.selectedDrum);
-    for (const lane of this.lanes) ranges[lane.drum] = [lane.pitch[0], lane.pitch[1]];
-    this.engine.setPitchRanges(ranges);
   }
 
   /** Resend grids + order. While playing the engine stages this and applies it
@@ -159,7 +145,7 @@ export class App {
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       try {
-        const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes, this.lanes, this.soundName);
+        const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes, this.lanesPerBlock, this.soundName);
         localStorage.setItem(PROJECT_KEY, JSON.stringify(json));
       } catch {
         /* ignore quota errors */
@@ -172,9 +158,9 @@ export class App {
       const raw = localStorage.getItem(PROJECT_KEY);
       if (!raw) return false;
       const json = JSON.parse(raw) as ProjectJSON;
-      this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanes);
+      this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanesPerBlock);
       this.soundName = json.soundName ?? this.soundName;
-      this.activeLane = this.lanes.length ? 0 : -1;
+      this.resetActiveLanes();
       return true;
     } catch {
       return false; // ignore corrupt storage
@@ -182,7 +168,7 @@ export class App {
   }
 
   private saveToFile(): void {
-    const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes, this.lanes, this.soundName);
+    const json = serialize(this.arr, this.kit, this.tempo, this.drumTypes, this.lanesPerBlock, this.soundName);
     const blob = new Blob([JSON.stringify(json, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -197,9 +183,9 @@ export class App {
     reader.onload = () => {
       try {
         const json = JSON.parse(String(reader.result)) as ProjectJSON;
-        this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanes);
+        this.tempo = deserialize(json, this.arr, this.kit, this.drumTypes, this.lanesPerBlock);
         this.soundName = json.soundName ?? "";
-        this.activeLane = this.lanes.length ? 0 : -1;
+        this.resetActiveLanes();
         this.afterProjectChange();
       } catch {
         alert("Could not load that file.");
@@ -213,9 +199,21 @@ export class App {
     this.kit = new DrumKit(this.drumTypes);
     this.applyRandomDefault(); // default editor sound: random Full Range
     this.tempo = 120;
-    this.lanes = [];
-    this.activeLane = -1;
+    for (const list of this.lanesPerBlock) list.length = 0;
+    this.activeLanePerBlock.fill(-1);
+    this.nextSoundId = 0;
     this.afterProjectChange();
+  }
+
+  /** After load/new: select each grid's first lane (or none if empty), and bump the
+      id counter past every loaded sound id so new lanes never collide with cells. */
+  private resetActiveLanes(): void {
+    let maxId = -1;
+    for (const lane of this.allLanes()) if (lane.soundId > maxId) maxId = lane.soundId;
+    this.nextSoundId = maxId + 1;
+    for (let b = 0; b < NUM_BLOCKS; b++) {
+      this.activeLanePerBlock[b] = this.lanesPerBlock[b].length ? 0 : -1;
+    }
   }
 
   private afterProjectChange(): void {
@@ -229,13 +227,14 @@ export class App {
 
   private audition(drum: DrumType): void {
     const gate = Math.round(this.engine.sampleRate * 0.4);
-    this.engine.trigger(drum, this.kit.get(drum).capture(), gate);
+    const snap = this.kit.get(drum).capture();
+    this.engine.audition(snap, gate, estimateLength(snap));
   }
 
-  /** Preview a lane on its own channel (lanes aren't in the editable kit). */
+  /** Preview a lane once (on the reserved audition channel). */
   private auditionLane(lane: Lane): void {
     const gate = Math.round(this.engine.sampleRate * 0.4);
-    this.engine.trigger(lane.drum, lane.snapshot, gate);
+    this.engine.audition(lane.snapshot, gate, estimateLength(lane.snapshot));
   }
 
   /** The editor's default sound: Full Range, fully shuffled so it's random and
@@ -249,9 +248,7 @@ export class App {
   /** After saving a sound: drop back to a fresh random Full Range sound. */
   private revertEditorToDefault(): void {
     this.applyRandomDefault();
-    this.engine.setParams(this.selectedDrum, this.kit.get(this.selectedDrum).capture());
-    this.pushPitchRanges();
-    this.audition(this.selectedDrum);
+    this.audition(this.selectedDrum); // editor sound is auditioned, not in the table
     this.persist();
     this.render();
   }
@@ -405,13 +402,13 @@ export class App {
       gridWrap.className = "grid-wrap";
       this.gridView.setBlock(this.arr.blocks[this.workspace]);
       this.gridView.setActiveDrum(this.activeDrumForPaint());
-      // Colour painted cells by the lane that owns that channel.
-      this.gridView.colorForDrum = (ch) => this.lanes.find((l) => l.drum === ch)?.color ?? drumColour(ch);
+      // Colour painted cells by the lane that owns that channel (any grid).
+      this.gridView.colorForDrum = (id) => this.allLanes().find((l) => l.soundId === id)?.color ?? drumColour(id);
       gridWrap.append(this.gridView.canvas);
       v.append(gridWrap);
 
       v.append(this.scaleControls());
-      v.append(this.mixerButton());
+      v.append(this.stepsActions());
       v.append(this.laneSelector());
 
       requestAnimationFrame(() => this.gridView.layout());
@@ -458,9 +455,15 @@ export class App {
     keyToggle.title = "Turn the key/scale mapping on or off for this pattern";
     keyToggle.onclick = () => {
       blk.keyEnabled = !blk.keyEnabled;
+      // Turning the key on targets the grid's current sounds by default; tap a sound's
+      // key badge in the lane bar to include/exclude individual ones.
+      if (blk.keyEnabled) {
+        blk.keyedDrums.clear();
+        for (const lane of this.lanes) blk.keyedDrums.add(lane.soundId);
+      }
       this.gridView.draw();
       this.syncPattern();
-      this.render(); // show/hide the Root + Scale pickers
+      this.render(); // show/hide the Root + Scale pickers + lane key badges
     };
     row.append(labelled("Key", keyToggle));
 
@@ -498,13 +501,169 @@ export class App {
     return row;
   }
 
-  /** Button below the scale controls that opens the per-lane mixer view. */
-  private mixerButton(): HTMLElement {
-    const b = document.createElement("button");
-    b.className = "mixer-open-btn";
-    b.textContent = "🎚 Mixer";
-    b.onclick = () => { this.view = "mixer"; this.render(); };
-    return b;
+  /** Row below the scale controls: open the Mixer or the preset-Rhythms picker. */
+  private stepsActions(): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "steps-actions";
+
+    const mix = document.createElement("button");
+    mix.className = "mixer-open-btn";
+    mix.textContent = "🎚 Mixer";
+    mix.onclick = () => { this.view = "mixer"; this.render(); };
+
+    const rhythms = document.createElement("button");
+    rhythms.className = "mixer-open-btn rhythms-open-btn";
+    rhythms.textContent = "🥁 Rhythms";
+    rhythms.onclick = () => this.openRhythmPanel();
+
+    row.append(mix, rhythms);
+    return row;
+  }
+
+  /** Modal: pick a preset rhythm, assign a saved sound to each track, then lay it
+      onto the current grid (each track on its own empty row; layered on top). */
+  private openRhythmPanel(): void {
+    const overlay = document.createElement("div");
+    overlay.className = "rhythm-overlay";
+    const modal = document.createElement("div");
+    modal.className = "rhythm-modal";
+    overlay.append(modal);
+    const close = () => overlay.remove();
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    let selected: Rhythm | null = null;
+    const assigned = new Map<string, SavedSound>(); // track name -> sound
+
+    const header = (title: string, onBack?: () => void) => {
+      const h = document.createElement("div");
+      h.className = "rhythm-head";
+      if (onBack) {
+        const back = document.createElement("button");
+        back.className = "rhythm-back";
+        back.textContent = "‹";
+        back.onclick = onBack;
+        h.append(back);
+      }
+      const t = document.createElement("span");
+      t.className = "rhythm-title";
+      t.textContent = title;
+      const x = document.createElement("button");
+      x.className = "rhythm-close";
+      x.textContent = "×";
+      x.onclick = close;
+      h.append(t, x);
+      return h;
+    };
+
+    // List of rhythms -> selecting one shows its track-assignment view.
+    const showList = () => {
+      modal.innerHTML = "";
+      modal.append(header("Preset Rhythms"));
+      const list = document.createElement("div");
+      list.className = "rhythm-list";
+      for (const r of RHYTHMS) {
+        const b = document.createElement("button");
+        b.className = "rhythm-item";
+        const nm = document.createElement("span");
+        nm.className = "rhythm-name";
+        nm.textContent = r.name;
+        const gn = document.createElement("span");
+        gn.className = "rhythm-genre";
+        gn.textContent = r.genre;
+        b.append(nm, gn);
+        b.onclick = () => { selected = r; assigned.clear(); showAssign(); };
+        list.append(b);
+      }
+      modal.append(list);
+    };
+
+    // Per-track sound assignment + Apply.
+    const showAssign = () => {
+      if (!selected) return showList();
+      modal.innerHTML = "";
+      modal.append(header(selected.name, showList));
+      const body = document.createElement("div");
+      body.className = "rhythm-assign";
+      for (const track of selected.tracks) {
+        const r = document.createElement("div");
+        r.className = "rhythm-track";
+        const nm = document.createElement("span");
+        nm.className = "rhythm-track-name";
+        nm.textContent = track.name;
+        const pick = document.createElement("button");
+        pick.className = "cat-btn rhythm-pick";
+        const chosen = assigned.get(track.name);
+        if (chosen) {
+          pick.classList.add("has-sound");
+          const sw = document.createElement("span");
+          sw.className = "swatch";
+          sw.style.background = chosen.color;
+          pick.append(sw, document.createTextNode(chosen.name));
+        } else {
+          pick.textContent = "Add sound";
+        }
+        pick.onclick = () => showAssignPick(track.name);
+        r.append(nm, pick);
+        body.append(r);
+      }
+      modal.append(body);
+
+      const apply = document.createElement("button");
+      apply.className = "rhythm-apply";
+      apply.textContent = "Apply to grid";
+      apply.onclick = () => {
+        if (assigned.size === 0) { alert("Assign a sound to at least one track first."); return; }
+        this.applyRhythm(selected!, assigned);
+        close();
+      };
+      modal.append(apply);
+    };
+
+    // Saved-sound picker for one track; picking returns to the assignment view.
+    const showAssignPick = (trackName: string) => {
+      modal.innerHTML = "";
+      modal.append(header(`Sound for ${trackName}`, showAssign));
+      modal.append(this.buildSoundList((s) => { assigned.set(trackName, s); showAssign(); }));
+    };
+
+    showList();
+    this.root.append(overlay);
+  }
+
+  /** Layer a rhythm onto the current grid: each assigned track becomes a new sound
+      on the next empty row, painted where the pattern hits. Existing rows are kept. */
+  private applyRhythm(rhythm: Rhythm, assigned: Map<string, SavedSound>): void {
+    const blk = this.arr.blocks[this.curBlock()];
+    const emptyRows: number[] = [];
+    for (let r = 0; r < NUM_ROWS; r++) {
+      let empty = true;
+      for (let s = 0; s < NUM_STEPS; s++) if (blk.getCell(r, s) >= 0) { empty = false; break; }
+      if (empty) emptyRows.push(r);
+    }
+
+    let placed = 0;
+    let skipped = 0;
+    for (const track of rhythm.tracks) {
+      const sound = assigned.get(track.name);
+      if (!sound) continue;
+      if (placed >= emptyRows.length) { skipped++; continue; } // out of empty rows
+      const id = this.nextSoundId++;
+      const lane: Lane = {
+        soundId: id,
+        name: sound.name,
+        snapshot: sound.snapshot.slice(),
+        color: sound.color,
+        pitch: [sound.pitch[0], sound.pitch[1]],
+      };
+      this.lanes.push(lane); // current grid's lane list
+      const row = emptyRows[placed++];
+      for (let s = 0; s < NUM_STEPS; s++) if (track.steps[s]) blk.setCell(row, s, id);
+    }
+
+    if (this.activeLane < 0 && this.lanes.length) this.activeLane = 0;
+    this.pushAll();
+    this.render();
+    if (skipped) alert(`${skipped} track(s) skipped — the grid ran out of empty rows or channels.`);
   }
 
   // --- mixer view -------------------------------------------------------
@@ -553,7 +712,7 @@ export class App {
     hd.className = "mix-strip-head";
     const led = document.createElement("span");
     led.className = "mix-led";
-    this.mixerLeds!.set(lane.drum, led);
+    this.mixerLeds!.set(lane.soundId, led);
     const name = document.createElement("span");
     name.className = "mix-name";
     name.textContent = lane.name;
@@ -571,13 +730,13 @@ export class App {
     mute.onclick = () => {
       lane.mute = !lane.mute;
       mute.classList.toggle("on", lane.mute);
-      this.pushLanes(); // mute/solo affect every lane's audibility
+      this.pushSounds(); // mute/solo affect every lane's audibility
       this.persist();
     };
     solo.onclick = () => {
       lane.solo = !lane.solo;
       solo.classList.toggle("on", !!lane.solo);
-      this.pushLanes();
+      this.pushSounds();
       this.persist();
     };
     toggles.append(mute, solo);
@@ -610,7 +769,7 @@ export class App {
     slider.oninput = () => {
       lane.snapshot[id] = Number(slider.value);
       val.textContent = pct(Number(slider.value));
-      this.pushLane(lane);
+      this.pushSounds();
       this.persist();
     };
     row.append(lbl, slider, val);
@@ -618,22 +777,42 @@ export class App {
   }
 
   // --- paint lanes ------------------------------------------------------
+  /** Grid the lane bar + paint act on (ORDER_VIEW falls back to grid 0). */
+  private curBlock(): number {
+    return this.workspace < NUM_BLOCKS ? this.workspace : 0;
+  }
+  /** Lanes of the current grid (the bar shown under it). */
+  private get lanes(): Lane[] {
+    return this.lanesPerBlock[this.curBlock()];
+  }
+  /** Every lane across all grids (engine pushes, colouring, channel allocation). */
+  private allLanes(): Lane[] {
+    return this.lanesPerBlock.flat();
+  }
+  /** Selected lane index within the current grid. */
+  private get activeLane(): number { return this.activeLanePerBlock[this.curBlock()]; }
+  private set activeLane(i: number) { this.activeLanePerBlock[this.curBlock()] = i; }
+
   /** Drum index the grid paints, or -1 when no lane is selected. */
   private activeDrumForPaint(): number {
     const lane = this.lanes[this.activeLane];
-    return lane ? lane.drum : -1;
+    return lane ? lane.soundId : -1;
   }
 
-  /** Added sound lanes (none by default) plus a + button to add from the library. */
+  /** Added sound lanes (none by default) plus a + button to add from the library.
+      When the grid's key is on, each pad shows a key badge to include/exclude that
+      sound from the key (only highlighted sounds get pitched by the row). */
   private laneSelector(): HTMLElement {
+    const blk = this.arr.blocks[this.curBlock()];
     const row = document.createElement("div");
     row.className = "lane-bar";
 
     const lanes = document.createElement("div");
     lanes.className = "lanes";
     this.lanes.forEach((lane, i) => {
+      const keyed = blk.keyEnabled && blk.isKeyed(lane.soundId);
       const b = document.createElement("button");
-      b.className = "drum-pad" + (i === this.activeLane ? " on" : "");
+      b.className = "drum-pad" + (i === this.activeLane ? " on" : "") + (keyed ? " keyed" : "");
       const sw = document.createElement("span");
       sw.className = "swatch";
       sw.style.background = lane.color;
@@ -641,6 +820,21 @@ export class App {
       name.textContent = lane.name;
       b.append(sw, name);
       b.onclick = () => this.selectLane(i);
+      // While the key is on, a tappable key badge toggles this sound's targeting.
+      if (blk.keyEnabled) {
+        const key = document.createElement("span");
+        key.className = "lane-key" + (keyed ? " on" : "");
+        key.textContent = "♪";
+        key.title = keyed ? "Key on for this sound (tap to exclude)" : "Tap to apply the key to this sound";
+        key.onclick = (e) => {
+          e.stopPropagation();
+          blk.toggleKeyed(lane.soundId);
+          this.gridView.draw();
+          this.syncPattern();
+          this.render();
+        };
+        b.append(key);
+      }
       // The selected lane gets an × to remove it.
       if (i === this.activeLane) {
         const rm = document.createElement("span");
@@ -667,39 +861,30 @@ export class App {
     this.activeLane = i;
     const lane = this.lanes[i];
     if (!lane) return;
-    // The lane already owns its channel + params; just paint with it and preview.
-    this.pushLane(lane);
-    this.gridView.setActiveDrum(lane.drum);
+    this.gridView.setActiveDrum(lane.soundId); // paint with this sound, and preview it
     this.auditionLane(lane);
     this.persist();
     this.render();
   }
 
   private removeLane(i: number): void {
-    this.lanes.splice(i, 1); // frees the channel for the next added sound
+    const lane = this.lanes[i];
+    if (lane) this.arr.blocks[this.curBlock()].keyedDrums.delete(lane.soundId); // don't leave it keyed
+    this.lanes.splice(i, 1);
     if (this.activeLane === i) this.activeLane = -1; // nothing selected to paint
     else if (this.activeLane > i) this.activeLane -= 1;
     this.gridView.setActiveDrum(this.activeDrumForPaint());
-    this.pushPitchRanges();
+    this.pushSounds(); // drop the removed sound from the engine table
     this.persist();
     this.render();
   }
 
-  /** First engine channel (0-11) not used by the editor voice or another lane. */
-  private nextFreeChannel(): number {
-    const used = new Set<number>([this.selectedDrum, ...this.lanes.map((l) => l.drum)]);
-    for (let c = 0; c < 12; c++) if (!used.has(c)) return c;
-    return -1;
-  }
-
-  /** Popup of every saved sound across drums; choosing one adds it as a lane. */
-  private openSoundPicker(anchor: HTMLElement): void {
-    const existing = anchor.querySelector(".sound-picker");
-    if (existing) { existing.remove(); return; }
-
+  /** A `.sound-picker` panel listing every saved sound, grouped into collapsible
+      folders; tapping one calls `onPick`. Reused by the lane + button and by the
+      rhythm track-assignment UI. */
+  private buildSoundList(onPick: (s: SavedSound) => void): HTMLElement {
     const panel = document.createElement("div");
     panel.className = "sound-picker";
-
     const items = this.library.all();
 
     const makeItem = (it: SavedSound, inFolder: boolean) => {
@@ -711,7 +896,7 @@ export class App {
       const name = document.createElement("span");
       name.textContent = it.name;
       b.append(sw, name);
-      b.onclick = () => { panel.remove(); this.addLane(it); };
+      b.onclick = () => onPick(it);
       return b;
     };
 
@@ -720,28 +905,42 @@ export class App {
       empty.className = "hint";
       empty.textContent = "No saved sounds yet. Save some in the Sounds view.";
       panel.append(empty);
-    } else {
-      // Group by folder name (folders can span drums), each collapsible, ungrouped last.
-      const folderNames = [...new Set(items.filter((s) => s.folder).map((s) => s.folder))]
-        .sort((a, b) => a.localeCompare(b));
-      const collapsed = new Set<string>();
-      const render = () => {
-        panel.innerHTML = "";
-        for (const f of folderNames) {
-          const group = items.filter((s) => s.folder === f);
-          const open = !collapsed.has(f);
-          const head = document.createElement("button");
-          head.className = "saved-folder-head";
-          head.textContent = `${open ? "▾" : "▸"} ${f} (${group.length})`;
-          head.onclick = () => { if (open) collapsed.add(f); else collapsed.delete(f); render(); };
-          panel.append(head);
-          if (open) for (const it of group) panel.append(makeItem(it, true));
-        }
-        for (const it of items.filter((s) => !s.folder)) panel.append(makeItem(it, false));
-      };
-      render();
+      return panel;
     }
+    // Group by folder name (folders can span drums), each collapsible, ungrouped last.
+    const folderNames = [...new Set(items.filter((s) => s.folder).map((s) => s.folder))]
+      .sort((a, b) => a.localeCompare(b));
+    const collapsed = new Set<string>();
+    const render = () => {
+      panel.innerHTML = "";
+      for (const f of folderNames) {
+        const group = items.filter((s) => s.folder === f);
+        const open = !collapsed.has(f);
+        const head = document.createElement("button");
+        head.className = "saved-folder-head";
+        head.textContent = `${open ? "▾" : "▸"} ${f} (${group.length})`;
+        const color = this.library.folderColor(f);
+        if (color) {
+          head.style.background = color;
+          head.style.color = textOn(color);
+          head.style.borderColor = "transparent";
+        }
+        head.onclick = () => { if (open) collapsed.add(f); else collapsed.delete(f); render(); };
+        panel.append(head);
+        if (open) for (const it of group) panel.append(makeItem(it, true));
+      }
+      for (const it of items.filter((s) => !s.folder)) panel.append(makeItem(it, false));
+    };
+    render();
+    return panel;
+  }
 
+  /** Popup of every saved sound across drums; choosing one adds it as a lane. */
+  private openSoundPicker(anchor: HTMLElement): void {
+    const existing = anchor.querySelector(".sound-picker");
+    if (existing) { existing.remove(); return; }
+
+    const panel = this.buildSoundList((s) => { panel.remove(); this.addLane(s); });
     anchor.append(panel);
     // Dismiss on the next outside tap.
     const close = (ev: PointerEvent) => {
@@ -754,18 +953,15 @@ export class App {
   }
 
   private addLane(sound: SavedSound): void {
-    const channel = this.nextFreeChannel();
-    if (channel < 0) { alert("Maximum number of sounds reached."); return; }
     const lane: Lane = {
-      drum: channel,
+      soundId: this.nextSoundId++,
       name: sound.name,
       snapshot: sound.snapshot.slice(),
       color: sound.color,
       pitch: [sound.pitch[0], sound.pitch[1]],
     };
     this.lanes.push(lane);
-    this.pushLane(lane);
-    this.pushPitchRanges();
+    this.pushSounds();
     this.selectLane(this.lanes.length - 1);
   }
 
@@ -849,14 +1045,10 @@ export class App {
     const v = this.viewRoot;
 
     const sound = new SoundView(this.kit, this.library, this.selectedDrum, this.soundName, {
-      onChange: (d) => {
-        this.engine.setParams(d, this.kit.get(d).capture());
-        this.persist();
-      },
-      onRangeChange: () => {
-        this.pushPitchRanges();
-        this.persist();
-      },
+      // The editor voice isn't in the engine sound table — it's auditioned on demand
+      // (onAudition reads the kit fresh), so edits just need persisting.
+      onChange: () => { this.persist(); },
+      onRangeChange: () => { this.persist(); },
       onAudition: (d) => this.audition(d),
       onRename: (name) => { this.soundName = name; this.persist(); },
       onSaved: () => this.revertEditorToDefault(),
@@ -864,6 +1056,15 @@ export class App {
 
     v.append(sound.el);
   }
+}
+
+// Black or white text for readability on a given hex background.
+function textOn(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6 ? "#15161a" : "#ffffff";
 }
 
 function labelled(text: string, control: HTMLElement): HTMLElement {

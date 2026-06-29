@@ -14,13 +14,30 @@ export interface SavedSound {
 }
 
 const STORAGE_KEY = "msq010.sounds";
+const FOLDER_COLOR_KEY = "msq010.folderColors";
 const DEFAULT_COLOR = "#888888";
 
 export class SoundLibrary {
   private data = new Map<DrumType, SavedSound[]>();
+  // Folder colours are keyed by folder NAME (global, not per-drum) so a folder of
+  // a given name reads the same everywhere it appears (Saved list + Steps picker).
+  private folderCols = new Map<string, string>();
 
   constructor() {
     this.load();
+    this.loadFolderColors();
+  }
+
+  /** Chosen colour for a folder, or undefined if none picked. */
+  folderColor(folder: string): string | undefined {
+    return folder ? this.folderCols.get(folder) : undefined;
+  }
+
+  /** Assign a folder a colour (shown on its header everywhere). */
+  setFolderColor(folder: string, color: string): void {
+    if (!folder) return;
+    this.folderCols.set(folder, color);
+    this.saveFolderColors();
   }
 
   list(drum: DrumType): SavedSound[] {
@@ -91,6 +108,29 @@ export class SoundLibrary {
     for (const [drum, list] of this.data) obj[drum] = list;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      /* ignore quota errors */
+    }
+  }
+
+  private loadFolderColors(): void {
+    try {
+      const raw = localStorage.getItem(FOLDER_COLOR_KEY);
+      if (!raw) return;
+      const obj = JSON.parse(raw) as Record<string, string>;
+      for (const k of Object.keys(obj)) {
+        if (typeof obj[k] === "string") this.folderCols.set(k, obj[k]);
+      }
+    } catch {
+      /* ignore corrupt storage */
+    }
+  }
+
+  private saveFolderColors(): void {
+    const obj: Record<string, string> = {};
+    for (const [name, color] of this.folderCols) obj[name] = color;
+    try {
+      localStorage.setItem(FOLDER_COLOR_KEY, JSON.stringify(obj));
     } catch {
       /* ignore quota errors */
     }
