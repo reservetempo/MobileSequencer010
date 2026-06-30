@@ -5,7 +5,7 @@
 // The loop plays the order list top to bottom, playing each referenced pattern's
 // 16 steps, then repeats.
 
-import { EUCLID_VOICES, euclidPattern, voiceDefault } from "./euclid";
+import { EUCLID_VOICES, euclidPattern, VOICE_DEFAULT } from "./euclid";
 
 export const NUM_ROWS = 5;
 export const NUM_STEPS = 16;
@@ -24,10 +24,12 @@ export interface EuclidVoice {
   hits: number;
   steps: number;
   rotation: number;
+  mute?: boolean; // mixer: silenced (same semantics as Lane)
+  solo?: boolean; // mixer: when any channel is soloed, only soloed ones are audible
 }
 
-function emptyVoice(slot = 0): EuclidVoice {
-  const d = voiceDefault(slot);
+function emptyVoice(): EuclidVoice {
+  const d = VOICE_DEFAULT;
   return { soundId: EMPTY, snapshot: [], color: "#888888", name: "", pitch: [60, 1000], hits: d.hits, steps: d.steps, rotation: d.rotation };
 }
 
@@ -62,9 +64,10 @@ export class MelodyGrid {
   // --- Euclidean mode ---------------------------------------------------
   // When true, the grid is a Euclidean sequencer: the manual cells are ignored and
   // `voices` (5 circles) play their Euclidean patterns instead. Cells are kept so
-  // toggling back to Manual restores the painted pattern untouched.
-  euclid = false;
-  readonly voices: EuclidVoice[] = Array.from({ length: EUCLID_VOICES }, (_, i) => emptyVoice(i));
+  // toggling back to Manual restores the painted pattern untouched. New grids open in
+  // Euclidean mode by default.
+  euclid = true;
+  readonly voices: EuclidVoice[] = Array.from({ length: EUCLID_VOICES }, () => emptyVoice());
 
   /** Length of the Euclidean loop: the largest active voice's step count (>=1). */
   euclidLen(): number {

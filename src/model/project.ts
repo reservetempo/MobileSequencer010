@@ -28,6 +28,8 @@ export interface EuclidVoiceJSON {
   hits: number;
   steps: number;
   rotation: number;
+  mute?: boolean; // mixer state; absent in older saves
+  solo?: boolean;
 }
 
 export interface ProjectJSON {
@@ -79,6 +81,7 @@ export function serialize(
       voices: g.voices.map((v) => ({
         soundId: v.soundId, snapshot: v.snapshot.slice(), color: v.color, name: v.name,
         pitch: [v.pitch[0], v.pitch[1]] as [number, number], hits: v.hits, steps: v.steps, rotation: v.rotation,
+        mute: v.mute, solo: v.solo,
       })),
     })),
     order: arr.orderArray(),
@@ -159,6 +162,8 @@ export function deserialize(
         dv.hits = sv.hits ?? 4;
         dv.steps = sv.steps ?? 8;
         dv.rotation = sv.rotation ?? 0;
+        dv.mute = !!sv.mute;
+        dv.solo = !!sv.solo;
       });
     }
   }

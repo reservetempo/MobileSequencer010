@@ -16,7 +16,7 @@ import {
 } from "../model/melodyGrid";
 import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
 import { RHYTHMS, Rhythm } from "../model/rhythms";
-import { EUCLID_VOICES, clampSteps, MAX_STEPS, voiceDefault } from "../model/euclid";
+import { EUCLID_VOICES, clampSteps, MAX_STEPS, VOICE_DEFAULT } from "../model/euclid";
 import { GridView } from "./gridView";
 import { EuclidView } from "./euclidView";
 import { SoundView } from "./soundView";
@@ -32,6 +32,18 @@ interface Lane {
   pitch: [number, number]; // Pitch range for melody mapping
   mute?: boolean; // mixer: silenced
   solo?: boolean; // mixer: when any lane is soloed, only soloed lanes are audible
+}
+
+// What the mixer strips, faders and mute/solo logic operate on. Both a paint Lane and
+// a Euclidean voice satisfy this, so a Euclidean grid mixes its voices the same way a
+// manual grid mixes its lanes.
+interface MixChannel {
+  soundId: number;
+  name: string;
+  snapshot: number[];
+  color: string;
+  mute?: boolean;
+  solo?: boolean;
 }
 
 const PROJECT_KEY = "msq010.project";
@@ -115,28 +127,40 @@ export class App {
   private pushSounds(): void {
     const sounds = this.allLanes().map((lane) => {
       const snap = lane.snapshot.slice();
-      if (!this.laneAudible(lane)) snap[ParamId.Volume] = 0;
+      if (!this.channelAudible(lane)) snap[ParamId.Volume] = 0;
       return { id: lane.soundId, snap, lo: lane.pitch[0], hi: lane.pitch[1], tail: estimateLength(snap) };
     });
-    // Euclidean voices across every grid are sounds too.
+    // Euclidean voices across every grid are sounds too — same mute/solo handling.
     for (const blk of this.arr.blocks) {
       if (!blk.euclid) continue;
       for (const v of blk.voices) {
         if (v.soundId < 0) continue;
-        sounds.push({ id: v.soundId, snap: v.snapshot.slice(), lo: v.pitch[0], hi: v.pitch[1], tail: estimateLength(v.snapshot) });
+        const snap = v.snapshot.slice();
+        if (!this.channelAudible(v)) snap[ParamId.Volume] = 0;
+        sounds.push({ id: v.soundId, snap, lo: v.pitch[0], hi: v.pitch[1], tail: estimateLength(snap) });
       }
     }
     this.engine.setSounds(sounds);
   }
 
-  /** True while at least one lane is soloed (so the rest are silenced). */
-  private anySolo(): boolean {
-    return this.allLanes().some((l) => l.solo);
+  /** Every mixable channel: each grid's paint lanes plus every assigned Euclidean voice. */
+  private allMixChannels(): MixChannel[] {
+    const out: MixChannel[] = [...this.allLanes()];
+    for (const blk of this.arr.blocks) {
+      if (!blk.euclid) continue;
+      for (const v of blk.voices) if (v.soundId >= 0) out.push(v);
+    }
+    return out;
   }
 
-  /** A lane is heard unless it's muted or another lane has stolen solo. */
-  private laneAudible(lane: Lane): boolean {
-    return !lane.mute && (!this.anySolo() || !!lane.solo);
+  /** True while at least one channel is soloed (so the rest are silenced). */
+  private anySolo(): boolean {
+    return this.allMixChannels().some((c) => c.solo);
+  }
+
+  /** A channel is heard unless it's muted or another channel has stolen solo. */
+  private channelAudible(ch: MixChannel): boolean {
+    return !ch.mute && (!this.anySolo() || !!ch.solo);
   }
 
   /** Resend grids + order. While playing the engine stages this and applies it
@@ -414,7 +438,6 @@ export class App {
       v.append(this.renderOrderEditor());
     } else {
       const blk = this.arr.blocks[this.workspace];
-      v.append(this.modeToggle());
 
       if (blk.euclid) {
         // Euclidean mode: circle visualization + the 5-voice menu (no cell grid).
@@ -445,6 +468,8 @@ export class App {
 
         requestAnimationFrame(() => this.gridView.layout());
       }
+
+      v.append(this.modeToggle()); // Manual / Euclid switch lives at the bottom of the page
     }
 
     this.updateLoopTime();
@@ -505,6 +530,8 @@ export class App {
         inp.type = "number";
         inp.value = String(value);
         inp.min = "0";
+        inp.inputMode = "numeric";
+        inp.onfocus = () => inp.select(); // one tap selects the value, ready to retype
         inp.onchange = () => { onSet(Number(inp.value)); };
         cell.append(lab, inp);
         return cell;
@@ -538,7 +565,9 @@ export class App {
     if (field === "steps") v.steps = clampSteps(n);
     else if (field === "hits") v.hits = Math.max(0, Math.min(MAX_STEPS, Math.round(n)));
     else v.rotation = Math.round(n);
-    if (v.hits > v.steps) v.hits = v.steps;
+    // Cap hits at steps only once steps is set (a blank voice defaults to 0 steps and
+    // shouldn't swallow a hits value the user types first).
+    if (v.steps >= 1 && v.hits > v.steps) v.hits = v.steps;
     this.syncPattern();
     this.euclidView.draw();
     this.updateLoopTime();
@@ -553,12 +582,10 @@ export class App {
       panel.remove();
       const v = this.arr.blocks[this.curBlock()].voices[slot];
       if (v.soundId < 0) {
-        // Fresh assignment: give this circle its slot's distinct default rhythm so
-        // several voices interleave instead of firing in unison (also upgrades older
-        // saves whose empty voices were stored with the shared 4/8/0 default).
+        // Fresh assignment: start the circle blank (all zero) so the user dials in the
+        // pattern (also resets older saves whose empty voices held a legacy default).
         v.soundId = this.nextSoundId++;
-        const d = voiceDefault(slot);
-        v.hits = d.hits; v.steps = d.steps; v.rotation = d.rotation;
+        v.hits = VOICE_DEFAULT.hits; v.steps = VOICE_DEFAULT.steps; v.rotation = VOICE_DEFAULT.rotation;
       }
       v.snapshot = s.snapshot.slice();
       v.color = s.color;
@@ -579,18 +606,18 @@ export class App {
     setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
   }
 
-  /** Empty a Euclidean voice slot: drop its sound and reset the circle to the slot's
-      default rhythm, then resync the engine + persist. */
+  /** Empty a Euclidean voice slot: drop its sound and reset the circle to blank (all
+      zero), then resync the engine + persist. */
   private clearEuclidVoice(slot: number): void {
     const v = this.arr.blocks[this.curBlock()].voices[slot];
     if (v.soundId < 0) return;
-    const d = voiceDefault(slot);
     v.soundId = EMPTY;
     v.snapshot = [];
     v.color = "#888888";
     v.name = "";
     v.pitch = [60, 1000];
-    v.hits = d.hits; v.steps = d.steps; v.rotation = d.rotation;
+    v.hits = VOICE_DEFAULT.hits; v.steps = VOICE_DEFAULT.steps; v.rotation = VOICE_DEFAULT.rotation;
+    v.mute = false; v.solo = false;
     this.pushSounds(); // drop the removed voice from the engine sound table
     this.syncPattern();
     this.euclidView.draw();
@@ -847,13 +874,19 @@ export class App {
   }
 
   // --- mixer view -------------------------------------------------------
-  // One channel strip per lane in the loop: a colour LED that flashes when the
-  // lane triggers, a Volume fader, Mute/Solo, and a Reverb send. Volume/Reverb
-  // write straight into the lane snapshot (Volume = index 22, ReverbMix = 21);
-  // Mute/Solo are applied at push time by zeroing Volume.
+  // One channel strip per mixable channel: a colour LED that flashes when it
+  // triggers, a Volume fader, Mute/Solo, and a Reverb send. Volume/Reverb write
+  // straight into the channel snapshot (Volume = index 22, ReverbMix = 21);
+  // Mute/Solo are applied at push time by zeroing Volume. A manual grid mixes its
+  // paint lanes; a Euclidean grid mixes its assigned voices.
   private renderMixer(): void {
     const v = this.viewRoot;
     this.mixerLeds = new Map();
+
+    const blk = this.arr.blocks[this.curBlock()];
+    const channels: MixChannel[] = blk.euclid
+      ? blk.voices.filter((vo) => vo.soundId >= 0)
+      : this.lanes;
 
     const head = document.createElement("div");
     head.className = "mixer-head";
@@ -867,55 +900,57 @@ export class App {
     head.append(back, title);
     v.append(head);
 
-    if (this.lanes.length === 0) {
+    if (channels.length === 0) {
       const hint = document.createElement("p");
       hint.className = "hint";
-      hint.textContent = "No sounds yet. Add some in the Steps view, then mix them here.";
+      hint.textContent = blk.euclid
+        ? "No voices yet. Assign sounds to this grid's circles in the Steps view, then mix them here."
+        : "No sounds yet. Add some in the Steps view, then mix them here.";
       v.append(hint);
       return;
     }
 
     const list = document.createElement("div");
     list.className = "mixer-list";
-    this.lanes.forEach((lane) => list.append(this.mixerStrip(lane)));
+    channels.forEach((ch) => list.append(this.mixerStrip(ch)));
     v.append(list);
   }
 
-  /** A single mixer channel strip for one lane. */
-  private mixerStrip(lane: Lane): HTMLElement {
+  /** A single mixer channel strip for one lane or Euclidean voice. */
+  private mixerStrip(ch: MixChannel): HTMLElement {
     const strip = document.createElement("div");
     strip.className = "mix-strip";
-    strip.style.setProperty("--lane", lane.color);
+    strip.style.setProperty("--lane", ch.color);
 
     // Header: flashing LED + name.
     const hd = document.createElement("div");
     hd.className = "mix-strip-head";
     const led = document.createElement("span");
     led.className = "mix-led";
-    this.mixerLeds!.set(lane.soundId, led);
+    this.mixerLeds!.set(ch.soundId, led);
     const name = document.createElement("span");
     name.className = "mix-name";
-    name.textContent = lane.name;
+    name.textContent = ch.name;
 
     const toggles = document.createElement("div");
     toggles.className = "mix-toggles";
     const mute = document.createElement("button");
-    mute.className = "mix-toggle mute" + (lane.mute ? " on" : "");
+    mute.className = "mix-toggle mute" + (ch.mute ? " on" : "");
     mute.textContent = "M";
     mute.title = "Mute";
     const solo = document.createElement("button");
-    solo.className = "mix-toggle solo" + (lane.solo ? " on" : "");
+    solo.className = "mix-toggle solo" + (ch.solo ? " on" : "");
     solo.textContent = "S";
     solo.title = "Solo";
     mute.onclick = () => {
-      lane.mute = !lane.mute;
-      mute.classList.toggle("on", lane.mute);
-      this.pushSounds(); // mute/solo affect every lane's audibility
+      ch.mute = !ch.mute;
+      mute.classList.toggle("on", ch.mute);
+      this.pushSounds(); // mute/solo affect every channel's audibility
       this.persist();
     };
     solo.onclick = () => {
-      lane.solo = !lane.solo;
-      solo.classList.toggle("on", !!lane.solo);
+      ch.solo = !ch.solo;
+      solo.classList.toggle("on", !!ch.solo);
       this.pushSounds();
       this.persist();
     };
@@ -924,13 +959,13 @@ export class App {
     strip.append(hd);
 
     // Faders: Volume + Reverb send, both 0..1 written into the snapshot.
-    strip.append(this.mixFader("Vol", lane, ParamId.Volume));
-    strip.append(this.mixFader("Verb", lane, ParamId.ReverbMix));
+    strip.append(this.mixFader("Vol", ch, ParamId.Volume));
+    strip.append(this.mixFader("Verb", ch, ParamId.ReverbMix));
     return strip;
   }
 
-  /** A labelled 0..1 fader bound to one snapshot index of a lane. */
-  private mixFader(label: string, lane: Lane, id: ParamId): HTMLElement {
+  /** A labelled 0..1 fader bound to one snapshot index of a channel. */
+  private mixFader(label: string, lane: MixChannel, id: ParamId): HTMLElement {
     const row = document.createElement("div");
     row.className = "mix-fader";
     const lbl = document.createElement("span");

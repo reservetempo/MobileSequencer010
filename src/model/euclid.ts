@@ -1,29 +1,15 @@
 // Euclidean rhythm generation. Spreads `hits` triggers as evenly as possible across
-// `steps` positions (the "bucket"/Bresenham method — same result as Bjorklund up to
-// rotation), then rotates so the pattern starts at `rotation`. Used by the per-grid
-// Euclidean sequencer mode (see MelodyGrid.voices).
+// `steps` positions (a Bresenham spread with the downbeat ON step 0), then rotates so
+// the pattern starts at `rotation`. Used by the per-grid Euclidean sequencer mode
+// (see MelodyGrid.voices).
 
 export const EUCLID_VOICES = 5;     // circles / voice slots per Euclidean grid
 export const MAX_STEPS = 64;        // upper bound on a voice's step count
-export const DEFAULT_STEPS = 8;
-export const DEFAULT_HITS = 4;
 
-// Per-slot starting pattern for each of the 5 voices. Deliberately distinct (different
-// hit counts + rotations) so assigning several sounds yields an interleaved polyrhythm
-// out of the box instead of every voice sharing one pattern and firing in unison.
+// New voices start blank — every value is 0, so a freshly assigned circle is silent
+// until the user dials in hits/steps/start. (steps 0 means the engine skips the voice.)
 export interface VoiceDefault { hits: number; steps: number; rotation: number; }
-export const EUCLID_VOICE_DEFAULTS: VoiceDefault[] = [
-  { hits: 4, steps: 8, rotation: 0 },
-  { hits: 3, steps: 8, rotation: 2 },
-  { hits: 5, steps: 8, rotation: 1 },
-  { hits: 2, steps: 8, rotation: 4 },
-  { hits: 3, steps: 8, rotation: 5 },
-];
-
-/** The starting hits/steps/rotation for voice slot `i` (falls back to slot 0). */
-export function voiceDefault(slot: number): VoiceDefault {
-  return EUCLID_VOICE_DEFAULTS[slot] ?? EUCLID_VOICE_DEFAULTS[0];
-}
+export const VOICE_DEFAULT: VoiceDefault = { hits: 0, steps: 0, rotation: 0 };
 
 export function clampSteps(n: number): number {
   return Math.max(1, Math.min(MAX_STEPS, Math.round(n) || 1));
@@ -34,14 +20,11 @@ export function clampSteps(n: number): number {
 export function euclidPattern(hits: number, steps: number, rotation: number): boolean[] {
   const n = clampSteps(steps);
   const k = Math.max(0, Math.min(n, Math.round(hits)));
+  // Even Bresenham spread with the downbeat on step 0: step i is a hit when (i*k) mod n
+  // falls in the first `k` of the cycle. Step 0 is always a hit when k>0, so the rhythm's
+  // start sits at 12 o'clock in the circle view (`start`/rotation rotates from there).
   const out = new Array<boolean>(n).fill(false);
-  if (k > 0) {
-    let bucket = 0;
-    for (let i = 0; i < n; i++) {
-      bucket += k;
-      if (bucket >= n) { bucket -= n; out[i] = true; }
-    }
-  }
+  for (let i = 0; i < n; i++) out[i] = (i * k) % n < k;
   const rot = ((Math.round(rotation) % n) + n) % n;
   if (rot === 0) return out;
   const rotated = new Array<boolean>(n);
