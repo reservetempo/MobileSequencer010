@@ -444,6 +444,13 @@ button:active { transform: scale(0.97); }
   color: var(--text); background: var(--panel2); border: 1px solid var(--line);
   border-radius: 6px; padding: 5px 2px;
 }
+.euclid-remove {
+  flex: 0 0 auto; align-self: stretch; width: 32px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; line-height: 1; color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+}
+.euclid-remove:hover, .euclid-remove:active { color: #ff6b6b; border-color: #ff6b6b; }
 
 /* key targeting: highlighted sounds get pitched by the row while the key is on */
 .drum-pad.keyed { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }

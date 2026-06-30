@@ -16,7 +16,7 @@ import {
 } from "../model/melodyGrid";
 import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
 import { RHYTHMS, Rhythm } from "../model/rhythms";
-import { EUCLID_VOICES, clampSteps, MAX_STEPS } from "../model/euclid";
+import { EUCLID_VOICES, clampSteps, MAX_STEPS, voiceDefault } from "../model/euclid";
 import { GridView } from "./gridView";
 import { EuclidView } from "./euclidView";
 import { SoundView } from "./soundView";
@@ -515,6 +515,17 @@ export class App {
       const start = mkNum("Start", voice.rotation, (n) => this.setEuclidNum(i, "rotation", n));
 
       r.append(sound, hits, steps, start);
+
+      // Remove button: clears the assigned sound from this slot (only shown when filled).
+      if (voice.soundId >= 0) {
+        const rm = document.createElement("button");
+        rm.className = "euclid-remove";
+        rm.textContent = "×";
+        rm.title = "Remove this sound";
+        rm.onclick = () => this.clearEuclidVoice(i);
+        r.append(rm);
+      }
+
       wrap.append(r);
     }
     return wrap;
@@ -541,7 +552,14 @@ export class App {
     const panel = this.buildSoundList((s) => {
       panel.remove();
       const v = this.arr.blocks[this.curBlock()].voices[slot];
-      if (v.soundId < 0) v.soundId = this.nextSoundId++;
+      if (v.soundId < 0) {
+        // Fresh assignment: give this circle its slot's distinct default rhythm so
+        // several voices interleave instead of firing in unison (also upgrades older
+        // saves whose empty voices were stored with the shared 4/8/0 default).
+        v.soundId = this.nextSoundId++;
+        const d = voiceDefault(slot);
+        v.hits = d.hits; v.steps = d.steps; v.rotation = d.rotation;
+      }
       v.snapshot = s.snapshot.slice();
       v.color = s.color;
       v.name = s.name;
@@ -559,6 +577,24 @@ export class App {
       }
     };
     setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+  }
+
+  /** Empty a Euclidean voice slot: drop its sound and reset the circle to the slot's
+      default rhythm, then resync the engine + persist. */
+  private clearEuclidVoice(slot: number): void {
+    const v = this.arr.blocks[this.curBlock()].voices[slot];
+    if (v.soundId < 0) return;
+    const d = voiceDefault(slot);
+    v.soundId = EMPTY;
+    v.snapshot = [];
+    v.color = "#888888";
+    v.name = "";
+    v.pitch = [60, 1000];
+    v.hits = d.hits; v.steps = d.steps; v.rotation = d.rotation;
+    this.pushSounds(); // drop the removed voice from the engine sound table
+    this.syncPattern();
+    this.euclidView.draw();
+    this.render();
   }
 
   /** Numbered pattern buttons (replacing the old dropdown) + the Loop view button. */

@@ -8,6 +8,23 @@ export const MAX_STEPS = 64;        // upper bound on a voice's step count
 export const DEFAULT_STEPS = 8;
 export const DEFAULT_HITS = 4;
 
+// Per-slot starting pattern for each of the 5 voices. Deliberately distinct (different
+// hit counts + rotations) so assigning several sounds yields an interleaved polyrhythm
+// out of the box instead of every voice sharing one pattern and firing in unison.
+export interface VoiceDefault { hits: number; steps: number; rotation: number; }
+export const EUCLID_VOICE_DEFAULTS: VoiceDefault[] = [
+  { hits: 4, steps: 8, rotation: 0 },
+  { hits: 3, steps: 8, rotation: 2 },
+  { hits: 5, steps: 8, rotation: 1 },
+  { hits: 2, steps: 8, rotation: 4 },
+  { hits: 3, steps: 8, rotation: 5 },
+];
+
+/** The starting hits/steps/rotation for voice slot `i` (falls back to slot 0). */
+export function voiceDefault(slot: number): VoiceDefault {
+  return EUCLID_VOICE_DEFAULTS[slot] ?? EUCLID_VOICE_DEFAULTS[0];
+}
+
 export function clampSteps(n: number): number {
   return Math.max(1, Math.min(MAX_STEPS, Math.round(n) || 1));
 }
