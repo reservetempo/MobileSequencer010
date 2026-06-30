@@ -5,11 +5,30 @@
 // The loop plays the order list top to bottom, playing each referenced pattern's
 // 16 steps, then repeats.
 
+import { EUCLID_VOICES, euclidPattern } from "./euclid";
+
 export const NUM_ROWS = 5;
 export const NUM_STEPS = 16;
 export const NUM_BLOCKS = 6;
 export const ORDER_SLOTS = 20;
 export const EMPTY = -1;
+
+// One voice (circle) of a grid in Euclidean mode: an assigned saved sound plus its
+// hits/steps/start. soundId = -1 when the slot is empty (no circle drawn / no audio).
+export interface EuclidVoice {
+  soundId: number;
+  snapshot: number[];
+  color: string;
+  name: string;
+  pitch: [number, number];
+  hits: number;
+  steps: number;
+  rotation: number;
+}
+
+function emptyVoice(): EuclidVoice {
+  return { soundId: EMPTY, snapshot: [], color: "#888888", name: "", pitch: [60, 1000], hits: 4, steps: 8, rotation: 0 };
+}
 
 // Identity colour per grid (distinct from the per-cell drum colours).
 export const GRID_COLORS = [
@@ -37,6 +56,20 @@ export class MelodyGrid {
   toggleKeyed(drum: number): void {
     if (this.keyedDrums.has(drum)) this.keyedDrums.delete(drum);
     else this.keyedDrums.add(drum);
+  }
+
+  // --- Euclidean mode ---------------------------------------------------
+  // When true, the grid is a Euclidean sequencer: the manual cells are ignored and
+  // `voices` (5 circles) play their Euclidean patterns instead. Cells are kept so
+  // toggling back to Manual restores the painted pattern untouched.
+  euclid = false;
+  readonly voices: EuclidVoice[] = Array.from({ length: EUCLID_VOICES }, emptyVoice);
+
+  /** Length of the Euclidean loop: the largest active voice's step count (>=1). */
+  euclidLen(): number {
+    let len = 1;
+    for (const v of this.voices) if (v.soundId !== EMPTY && v.steps > len) len = v.steps;
+    return len;
   }
 
   private idx(row: number, step: number): number {
@@ -71,6 +104,10 @@ export interface BlockMessage {
   scale: number;
   keyEnabled: boolean;
   keyedDrums: number[]; // channels the key targets (see MelodyGrid.keyedDrums)
+  euclid: boolean;      // when true the engine plays `voices`, not cells
+  len: number;          // steps in this grid (16 manual, else the Euclidean loop length)
+  // Per-voice precomputed Euclidean pattern (1/0) + its sound id, for the engine.
+  voices: { soundId: number; steps: number; pattern: number[] }[];
 }
 
 export class WipArrangement {
@@ -83,7 +120,8 @@ export class WipArrangement {
     this.order[0] = 0; // start with grid 1 in the loop
   }
 
-  /** Grids serialised for the worklet scheduler. */
+  /** Grids serialised for the worklet scheduler. Euclidean patterns are precomputed
+      here so the worklet stays pattern-only. */
   blocksMessage(): BlockMessage[] {
     return this.blocks.map((g) => ({
       cells: Array.from(g.cells),
@@ -91,6 +129,17 @@ export class WipArrangement {
       scale: g.scale,
       keyEnabled: g.keyEnabled,
       keyedDrums: [...g.keyedDrums],
+      euclid: g.euclid,
+      len: g.euclid ? g.euclidLen() : NUM_STEPS,
+      voices: g.euclid
+        ? g.voices
+            .filter((v) => v.soundId !== EMPTY)
+            .map((v) => ({
+              soundId: v.soundId,
+              steps: v.steps,
+              pattern: euclidPattern(v.hits, v.steps, v.rotation).map((b) => (b ? 1 : 0)),
+            }))
+        : [],
     }));
   }
 
@@ -116,8 +165,17 @@ export class WipArrangement {
     return n;
   }
 
-  /** Total 16th-note steps in one loop pass. */
+  /** Total 16th-note steps in one loop pass (each filled slot contributes its grid's
+      length: 16 for manual, the Euclidean loop length otherwise). */
   loopSteps(): number {
-    return this.filledSlots() * NUM_STEPS;
+    let total = 0;
+    for (let i = 0; i < ORDER_SLOTS; i++) {
+      const g = this.order[i];
+      if (g >= 0 && g < this.blocks.length) {
+        const b = this.blocks[g];
+        total += b.euclid ? b.euclidLen() : NUM_STEPS;
+      }
+    }
+    return total;
   }
 }

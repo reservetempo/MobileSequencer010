@@ -690,51 +690,71 @@ class EngineProcessor extends AudioWorkletProcessor {
     ch.trigger(voiceSnap, gate);
   }
 
-  // Fire one step of the ordered sequence: walk the 20-slot order list, play each
-  // referenced pattern's 16 columns, looping. Each painted row triggers pitched to
-  // its grid's key. Staged edits are promoted only at the loop boundary.
+  // Fire one step of the ordered sequence. Grids are variable-length: a manual grid is
+  // 16 steps; a Euclidean grid is its loop length (`len`). Each entry carries its start
+  // offset so we can find which grid + local step `seqPos` lands on. Staged edits are
+  // promoted only at the loop boundary.
   fireStep(gate) {
     const blocks = this.blocks;
     const order = this.order;
     if (!blocks || !order) { this.reportPlayhead(-1, -1, -1); return; }
 
-    // Build the play sequence from filled order slots.
+    // Build the play sequence with cumulative start offsets + per-grid lengths.
     const seq = [];
+    let total = 0;
     for (let i = 0; i < order.length; i++) {
-      const g = order[i];
-      if (g >= 0 && g < blocks.length) seq.push({ grid: g, slot: i });
+      const gi = order[i];
+      if (gi >= 0 && gi < blocks.length) {
+        const b = blocks[gi];
+        const len = b.euclid ? Math.max(1, b.len | 0) : NUM_STEPS;
+        seq.push({ grid: gi, slot: i, start: total, len });
+        total += len;
+      }
     }
-    if (seq.length === 0) { this.reportPlayhead(-1, -1, -1); return; }
-
-    const total = seq.length * NUM_STEPS;
+    if (total === 0) { this.reportPlayhead(-1, -1, -1); return; }
     if (this.seqPos >= total) this.seqPos %= total;
 
-    const entry = seq[(this.seqPos / NUM_STEPS) | 0];
-    const col = this.seqPos % NUM_STEPS;
+    // Find the entry whose [start, start+len) window contains seqPos.
+    let e = 0;
+    while (e + 1 < seq.length && seq[e + 1].start <= this.seqPos) e++;
+    const entry = seq[e];
+    const localStep = this.seqPos - entry.start;
     const g = blocks[entry.grid];
 
-    // Key targeting: when the block's key is on, only the sounds in keyedDrums get
-    // pitched to the row's note; everything else plays as-is. A missing list (older
-    // patterns) means "all", preserving the old all-rows-keyed behaviour.
-    const keyedSet = Array.isArray(g.keyedDrums) ? new Set(g.keyedDrums) : null;
-
     const fired = [];
-    for (let row = 0; row < NUM_ROWS; row++) {
-      const id = g.cells[row * NUM_STEPS + col]; // cell = stable sound id
-      if (id < 0) continue;
-      const snd = this.sounds.get(id);
-      if (!snd) continue; // sound was removed -> skip (no empty-channel trigger)
-
-      const voiceSnap = snd.snap.slice();
-      // ...pitched to the row's note when the key is on AND this sound is targeted.
-      if (g.keyEnabled !== false && (keyedSet === null || keyedSet.has(id))) {
-        voiceSnap[P.Pitch] = frequencyFor(row, g.root, g.scale, snd.lo, snd.hi);
+    if (g.euclid) {
+      // Euclidean: each voice (circle) triggers when its pattern hits at localStep,
+      // cycling independently (polyrhythm) within the grid's loop length.
+      const voices = g.voices || [];
+      for (let v = 0; v < voices.length; v++) {
+        const vo = voices[v];
+        if (!vo || vo.soundId < 0 || !vo.pattern || vo.steps < 1) continue;
+        if (!vo.pattern[localStep % vo.steps]) continue;
+        const snd = this.sounds.get(vo.soundId);
+        if (!snd) continue;
+        this.triggerSound(vo.soundId, snd.snap, snd.snap.slice(), gate, snd.tail);
+        fired.push(vo.soundId);
       }
-      this.triggerSound(id, snd.snap, voiceSnap, gate, snd.tail);
-      fired.push(id);
+    } else {
+      // Manual: key targeting — only sounds in keyedDrums get pitched to the row's note
+      // (a missing list = all, for older patterns).
+      const keyedSet = Array.isArray(g.keyedDrums) ? new Set(g.keyedDrums) : null;
+      for (let row = 0; row < NUM_ROWS; row++) {
+        const id = g.cells[row * NUM_STEPS + localStep]; // cell = stable sound id
+        if (id < 0) continue;
+        const snd = this.sounds.get(id);
+        if (!snd) continue; // sound was removed -> skip (no empty-channel trigger)
+
+        const voiceSnap = snd.snap.slice();
+        if (g.keyEnabled !== false && (keyedSet === null || keyedSet.has(id))) {
+          voiceSnap[P.Pitch] = frequencyFor(row, g.root, g.scale, snd.lo, snd.hi);
+        }
+        this.triggerSound(id, snd.snap, voiceSnap, gate, snd.tail);
+        fired.push(id);
+      }
     }
 
-    this.reportPlayhead(entry.grid, col, entry.slot, fired);
+    this.reportPlayhead(entry.grid, localStep, entry.slot, fired);
 
     this.seqPos = (this.seqPos + 1) % total;
     if (this.seqPos === 0) this.promotePending(); // loop completed -> apply staged edits

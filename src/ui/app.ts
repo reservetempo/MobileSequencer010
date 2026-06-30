@@ -16,7 +16,9 @@ import {
 } from "../model/melodyGrid";
 import { ALL_ROOTS, ALL_SCALES } from "../model/melodyScale";
 import { RHYTHMS, Rhythm } from "../model/rhythms";
+import { EUCLID_VOICES, clampSteps, MAX_STEPS } from "../model/euclid";
 import { GridView } from "./gridView";
+import { EuclidView } from "./euclidView";
 import { SoundView } from "./soundView";
 
 // A paint lane added from the saved-sound library. Each lane has a stable `soundId`
@@ -63,6 +65,7 @@ export class App {
   private root: HTMLElement;
   private viewRoot!: HTMLElement;
   private gridView = new GridView(this.arr.blocks[0]);
+  private euclidView = new EuclidView(this.arr.blocks[0]);
   private loopTimeEl: HTMLElement | null = null;
   private orderSlotEls: HTMLElement[] | null = null;
   // Channel -> flash LED, populated while the Mixer view is shown.
@@ -80,8 +83,11 @@ export class App {
   }
 
   private handlePlayhead(p: Playhead): void {
-    const col = this.workspace < NUM_BLOCKS && p.grid === this.workspace ? p.col : -1;
-    this.gridView.setPlayhead(col);
+    const onCurrent = this.workspace < NUM_BLOCKS && p.grid === this.workspace;
+    const step = onCurrent ? p.col : -1; // p.col is the grid-local step (manual or Euclidean)
+    const blk = this.workspace < NUM_BLOCKS ? this.arr.blocks[this.workspace] : null;
+    if (blk && blk.euclid) this.euclidView.setPlayhead(step);
+    else this.gridView.setPlayhead(step);
     if (this.orderSlotEls) {
       this.orderSlotEls.forEach((el, i) => el.classList.toggle("playing", i === p.slot));
     }
@@ -112,6 +118,14 @@ export class App {
       if (!this.laneAudible(lane)) snap[ParamId.Volume] = 0;
       return { id: lane.soundId, snap, lo: lane.pitch[0], hi: lane.pitch[1], tail: estimateLength(snap) };
     });
+    // Euclidean voices across every grid are sounds too.
+    for (const blk of this.arr.blocks) {
+      if (!blk.euclid) continue;
+      for (const v of blk.voices) {
+        if (v.soundId < 0) continue;
+        sounds.push({ id: v.soundId, snap: v.snapshot.slice(), lo: v.pitch[0], hi: v.pitch[1], tail: estimateLength(v.snapshot) });
+      }
+    }
     this.engine.setSounds(sounds);
   }
 
@@ -365,6 +379,7 @@ export class App {
       else {
         this.engine.stop();
         this.gridView.setPlayhead(-1);
+        this.euclidView.setPlayhead(-1);
       }
       play.textContent = this.playing ? "■" : "▶";
     };
@@ -398,23 +413,152 @@ export class App {
     if (this.workspace === ORDER_VIEW) {
       v.append(this.renderOrderEditor());
     } else {
-      const gridWrap = document.createElement("div");
-      gridWrap.className = "grid-wrap";
-      this.gridView.setBlock(this.arr.blocks[this.workspace]);
-      this.gridView.setActiveDrum(this.activeDrumForPaint());
-      // Colour painted cells by the lane that owns that channel (any grid).
-      this.gridView.colorForDrum = (id) => this.allLanes().find((l) => l.soundId === id)?.color ?? drumColour(id);
-      gridWrap.append(this.gridView.canvas);
-      v.append(gridWrap);
+      const blk = this.arr.blocks[this.workspace];
+      v.append(this.modeToggle());
 
-      v.append(this.scaleControls());
-      v.append(this.stepsActions());
-      v.append(this.laneSelector());
+      if (blk.euclid) {
+        // Euclidean mode: circle visualization + the 5-voice menu (no cell grid).
+        this.euclidView.setBlock(blk);
+        const wrap = document.createElement("div");
+        wrap.className = "euclid-wrap";
+        wrap.append(this.euclidView.canvas);
+        v.append(wrap);
+        v.append(this.euclidMenu());
+        v.append(this.stepsActions());
+        // viewRoot is already in the DOM, so size synchronously (reads real width),
+        // and again on the next frame as a fallback for first-paint width.
+        this.euclidView.layout();
+        requestAnimationFrame(() => this.euclidView.layout());
+      } else {
+        const gridWrap = document.createElement("div");
+        gridWrap.className = "grid-wrap";
+        this.gridView.setBlock(blk);
+        this.gridView.setActiveDrum(this.activeDrumForPaint());
+        // Colour painted cells by the lane that owns that channel (any grid).
+        this.gridView.colorForDrum = (id) => this.allLanes().find((l) => l.soundId === id)?.color ?? drumColour(id);
+        gridWrap.append(this.gridView.canvas);
+        v.append(gridWrap);
 
-      requestAnimationFrame(() => this.gridView.layout());
+        v.append(this.scaleControls());
+        v.append(this.stepsActions());
+        v.append(this.laneSelector());
+
+        requestAnimationFrame(() => this.gridView.layout());
+      }
     }
 
     this.updateLoopTime();
+  }
+
+  /** Manual / Euclidean mode toggle for the current grid. */
+  private modeToggle(): HTMLElement {
+    const blk = this.arr.blocks[this.curBlock()];
+    const row = document.createElement("div");
+    row.className = "mode-toggle";
+    (["Manual", "Euclid"] as const).forEach((label, i) => {
+      const isEuclid = i === 1;
+      const b = document.createElement("button");
+      b.className = "mode-btn" + (blk.euclid === isEuclid ? " on" : "");
+      b.textContent = label;
+      b.onclick = () => {
+        if (blk.euclid === isEuclid) return;
+        blk.euclid = isEuclid;
+        this.pushSounds(); // euclid voices enter/leave the sound table
+        this.syncPattern();
+        this.render();
+      };
+      row.append(b);
+    });
+    return row;
+  }
+
+  /** The 5-voice Euclidean menu: each row assigns a saved sound + hits/steps/start. */
+  private euclidMenu(): HTMLElement {
+    const blk = this.arr.blocks[this.curBlock()];
+    const wrap = document.createElement("div");
+    wrap.className = "euclid-menu";
+
+    for (let i = 0; i < EUCLID_VOICES; i++) {
+      const voice = blk.voices[i];
+      const r = document.createElement("div");
+      r.className = "euclid-row";
+
+      // Sound assignment (reuses the saved-sound picker).
+      const sound = document.createElement("button");
+      sound.className = "euclid-sound" + (voice.soundId >= 0 ? " has-sound" : "");
+      if (voice.soundId >= 0) {
+        const sw = document.createElement("span");
+        sw.className = "swatch";
+        sw.style.background = voice.color;
+        sound.append(sw, document.createTextNode(voice.name || `Voice ${i + 1}`));
+      } else {
+        sound.textContent = `+ Voice ${i + 1}`;
+      }
+      sound.onclick = () => this.openEuclidSoundPicker(sound, i);
+
+      const mkNum = (label: string, value: number, onSet: (n: number) => void) => {
+        const cell = document.createElement("label");
+        cell.className = "euclid-num";
+        const lab = document.createElement("span");
+        lab.textContent = label;
+        const inp = document.createElement("input");
+        inp.type = "number";
+        inp.value = String(value);
+        inp.min = "0";
+        inp.onchange = () => { onSet(Number(inp.value)); };
+        cell.append(lab, inp);
+        return cell;
+      };
+
+      const hits = mkNum("Hits", voice.hits, (n) => this.setEuclidNum(i, "hits", n));
+      const steps = mkNum("Steps", voice.steps, (n) => this.setEuclidNum(i, "steps", n));
+      const start = mkNum("Start", voice.rotation, (n) => this.setEuclidNum(i, "rotation", n));
+
+      r.append(sound, hits, steps, start);
+      wrap.append(r);
+    }
+    return wrap;
+  }
+
+  /** Update a Euclidean voice's hits/steps/rotation (clamped), then resync + redraw. */
+  private setEuclidNum(slot: number, field: "hits" | "steps" | "rotation", n: number): void {
+    const v = this.arr.blocks[this.curBlock()].voices[slot];
+    if (Number.isNaN(n)) n = 0;
+    if (field === "steps") v.steps = clampSteps(n);
+    else if (field === "hits") v.hits = Math.max(0, Math.min(MAX_STEPS, Math.round(n)));
+    else v.rotation = Math.round(n);
+    if (v.hits > v.steps) v.hits = v.steps;
+    this.syncPattern();
+    this.euclidView.draw();
+    this.updateLoopTime();
+    this.render(); // reflect clamped values in the inputs
+  }
+
+  /** Saved-sound picker for one Euclidean voice slot. */
+  private openEuclidSoundPicker(anchor: HTMLElement, slot: number): void {
+    const existing = this.viewRoot.querySelector(".sound-picker");
+    if (existing) { existing.remove(); return; }
+    const panel = this.buildSoundList((s) => {
+      panel.remove();
+      const v = this.arr.blocks[this.curBlock()].voices[slot];
+      if (v.soundId < 0) v.soundId = this.nextSoundId++;
+      v.snapshot = s.snapshot.slice();
+      v.color = s.color;
+      v.name = s.name;
+      v.pitch = [s.pitch[0], s.pitch[1]];
+      this.pushSounds();
+      this.syncPattern();
+      this.engine.audition(v.snapshot, Math.round(this.engine.sampleRate * 0.4), estimateLength(v.snapshot));
+      this.render();
+    });
+    anchor.parentElement?.append(panel);
+    const close = (ev: PointerEvent) => {
+      if (!panel.contains(ev.target as Node) && ev.target !== anchor) {
+        panel.remove();
+        document.removeEventListener("pointerdown", close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
   }
 
   /** Numbered pattern buttons (replacing the old dropdown) + the Loop view button. */

@@ -18,10 +18,25 @@ export interface LaneJSON {
   solo?: boolean;
 }
 
+// A Euclidean voice (circle) of a grid: assigned sound + hits/steps/start. (v6+)
+export interface EuclidVoiceJSON {
+  soundId: number;
+  snapshot: number[];
+  color: string;
+  name: string;
+  pitch: [number, number];
+  hits: number;
+  steps: number;
+  rotation: number;
+}
+
 export interface ProjectJSON {
-  version: 3 | 4 | 5;
+  version: 3 | 4 | 5 | 6;
   tempo: number;
-  blocks: { cells: number[]; root: number; scale: number; keyEnabled?: boolean; keyedDrums?: number[] }[];
+  blocks: {
+    cells: number[]; root: number; scale: number; keyEnabled?: boolean; keyedDrums?: number[];
+    euclid?: boolean; voices?: EuclidVoiceJSON[]; // v6+
+  }[];
   order: number[];
   drums: Record<number, number[]>; // drum type -> param snapshot
   // drum type -> live shuffle window (v3+); absent saves fall back to factory ranges.
@@ -50,9 +65,22 @@ export function serialize(
     drumPresets[d] = kit.get(d).presetName();
   }
   return {
-    version: 5,
+    version: 6,
     tempo,
-    blocks: arr.blocksMessage(),
+    // Persist the editable grid state (NOT blocksMessage, which is engine-shaped and
+    // drops the Euclidean voice config).
+    blocks: arr.blocks.map((g) => ({
+      cells: Array.from(g.cells),
+      root: g.root,
+      scale: g.scale,
+      keyEnabled: g.keyEnabled,
+      keyedDrums: [...g.keyedDrums],
+      euclid: g.euclid,
+      voices: g.voices.map((v) => ({
+        soundId: v.soundId, snapshot: v.snapshot.slice(), color: v.color, name: v.name,
+        pitch: [v.pitch[0], v.pitch[1]] as [number, number], hits: v.hits, steps: v.steps, rotation: v.rotation,
+      })),
+    })),
     order: arr.orderArray(),
     drums: drumSnaps,
     ranges: drumRanges,
@@ -82,7 +110,7 @@ export function deserialize(
 ): number {
   for (const list of lanesPerBlock) list.length = 0;
   const v = json && (json as { version: number }).version;
-  if (!json || (v !== 1 && v !== 2 && v !== 3 && v !== 4 && v !== 5)) return 120;
+  if (!json || (v !== 1 && v !== 2 && v !== 3 && v !== 4 && v !== 5 && v !== 6)) return 120;
 
   // v4+: a lane list per grid. v1-v3: one global list -> migrate into block 0.
   if (json.lanesPerBlock) {
@@ -116,6 +144,22 @@ export function deserialize(
         const d = dst.cells[i];
         if (d >= 0) dst.keyedDrums.add(d);
       }
+    }
+    // Euclidean mode (v6+); older saves stay manual with empty voices.
+    dst.euclid = !!src.euclid;
+    if (Array.isArray(src.voices)) {
+      src.voices.forEach((sv, i) => {
+        if (i >= dst.voices.length || !sv) return;
+        const dv = dst.voices[i];
+        dv.soundId = typeof sv.soundId === "number" ? sv.soundId : EMPTY;
+        dv.snapshot = Array.isArray(sv.snapshot) ? sv.snapshot.slice() : [];
+        dv.color = sv.color ?? "#888888";
+        dv.name = String(sv.name ?? "");
+        dv.pitch = Array.isArray(sv.pitch) && sv.pitch.length === 2 ? [sv.pitch[0], sv.pitch[1]] : [60, 1000];
+        dv.hits = sv.hits ?? 4;
+        dv.steps = sv.steps ?? 8;
+        dv.rotation = sv.rotation ?? 0;
+      });
     }
   }
 
